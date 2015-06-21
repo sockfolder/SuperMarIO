@@ -123,6 +123,22 @@ function mergeInto(dest, source)
 	return dest
 end
 
+
+function deepMergeInto(dest, source)
+	for k, v in pairs(source) do
+		if type(v) == "table" then 
+			if type(v.copy) == "function" then
+				dest[k] = v:copy()
+			else
+				dest[k] = deepCopy(v)
+			end
+		else
+			dest[k] = v
+		end
+	end
+	return dest
+end
+
 -- A maximum 2 level copy
 function copyValuesInto(dest, source, values)
 	for _, v in ipairs(values) do
@@ -309,7 +325,6 @@ Class = (function()
 		})
 		
 		mergeInto(class, initialization)
-		--writeTableToConsole(class)
 		return class
 	end
 	
@@ -348,7 +363,7 @@ end
 
 -- Interface mechanism
 function abstractFunction(self)
-	Error:throw("Abstract method called in "..self)
+	Error:throw("Abstract method called in "..tostring(self))
 end
 
 function optionalFunction(self)
@@ -410,6 +425,14 @@ end
 --- Functions to get key game specific values (sprites, etc.)
 ---========================================---
 
+-- Helper Functions
+local u8  = mainmemory.read_u8
+local s8  = mainmemory.read_s8
+local u16 = mainmemory.read_u16_le
+local s16 = mainmemory.read_s16_le
+local u24 = mainmemory.read_u24_le
+local s24 = mainmemory.read_s24_le
+
 -- Interface Game
 Game = Interface(nil, {
 	defaultState = "0.state",
@@ -443,11 +466,11 @@ SMW = Class(nil, {
 }):implements(Game);
 
 function SMW:readValues()
-    self.marioX = memory.read_s16_le(0x94)
-    self.marioY = memory.read_s16_le(0x96)
-               
-    local layer1x = memory.read_s16_le(0x1A);
-    local layer1y = memory.read_s16_le(0x1C);
+	self.marioX = memory.read_s16_le(0x94)
+	self.marioY = memory.read_s16_le(0x96)
+			   
+	local layer1x = memory.read_s16_le(0x1A);
+	local layer1y = memory.read_s16_le(0x1C);
 
 	marioX = self.marioX
 	marioY = self.marioY
@@ -457,6 +480,10 @@ function SMW:readValues()
 	
 	screenX = self.screenX
 	screenY = self.screenY
+	
+	self.marioXSpeed = s8(0x7B) + u8(0x7A)/0x100
+	self.marioYSpeed = s8(0x007D)
+	
 end
 
 function SMW:getTile(dx, dy)
@@ -501,23 +528,23 @@ SMB = Class(nil, {
 	rightEnd = 3186,
 	defaultState = "SMB1-1.state",
 	buttonNames = {
-                "A",
-                "B",
-                "X",
-                "Y",
-                "Up",
-                "Down",
-                "Left",
-                "Right",
-    }
+		"A",
+		"B",
+		"X",
+		"Y",
+		"Up",
+		"Down",
+		"Left",
+		"Right",
+	}
 }):implements(SMB, Game)
 
 function SMB:readValues()
-    self.marioX = memory.readbyte(0x6D) * 0x100 + memory.readbyte(0x86)
-    self.marioY = memory.readbyte(0x03B8)+16
-       
-    self.screenX = memory.readbyte(0x03AD)
-    self.screenY = memory.readbyte(0x03B8)
+	self.marioX = memory.readbyte(0x6D) * 0x100 + memory.readbyte(0x86)
+	self.marioY = memory.readbyte(0x03B8)+16
+	   
+	self.screenX = memory.readbyte(0x03AD)
+	self.screenY = memory.readbyte(0x03B8)
 	
 	marioX = self.marioX
 	marioY = self.marioY
@@ -676,16 +703,18 @@ end
 IOConfig = Class(nil, {
 	names = {},
 	data = {},
+	size = 0,
+	partSize = {}
 })
 -- Data format is list of:
 --         { name = ?, id = ?, param = ? }
 --		OR { name = ?, range = {?, ?}, param = ? }
---		OR { name = ?, param = ? }
+--		OR { name = ?, range = ?, param = ? }
 
 function IOConfig:init(data, names)
 	self.data = data
-	
 	self.names = names
+	self.layout = {}
 	
 	if names == nil then
 		self.names = {}
@@ -698,14 +727,44 @@ function IOConfig:init(data, names)
 			end
 		end
 	end
+	
+	self.size = 0
+	
+	for _, data in ipairs(data) do
+		local name, id, range = data.name, data.id, data.range
+		local inputSize = 0
+		if data.id ~= nil then
+			inputSize = 1
+		elseif data.range~= nil then
+			if type(data.range) == "table" then
+				inputSize = data.range[2]-data.range[1]+1
+			else
+				inputSize = data.range
+			end
+		end
+		self.layout[name] = { size = inputSize, offset = self.size+1 }
+		self.size = self.size + inputSize
+	end
 end
 
 function IOConfig:copy(other)
 	return IOConfig(other.data, other.names)
 end
 
+function IOConfig:getData()
+	return self.data
+end
+
 function IOConfig:getNames()
 	return self.names
+end
+
+function IOConfig:getSize()
+	return self.size
+end
+
+function IOConfig:layoutInfo(name)
+	return self.layout[name]
 end
 
 function IOConfig:iterator(ioObject)
@@ -720,18 +779,25 @@ function IOConfig:iterator(ioObject)
 		end
 		
 		local data = self.data[dataIndex]
-		local name = data.name, id, handle
+		local name = data.name
+		local id, handle
 		
 		if range == nil then
 			if data.id ~= nil then
 				dataIndex = dataIndex + 1
 				id = data.id
 			elseif data.range ~= nil then
-				range = data.range
-				rangeIndex = range[1]
+				if type(data.range) == "table" then
+					range = data.range
+					rangeIndex = range[1]
+				else
+					range = {1, data.range}
+					rangeIndex = range[1]
+				end
 			else
-				range = {1, ioObject:sizeOf(name)}
-				rangeIndex = range[1]
+				--range = {1, ioObject.size}
+				Error:throw("Invalid IOConfig")
+				return nil
 			end
 		end
 		
@@ -766,12 +832,12 @@ function IOMap:init(set)
 	local totalSize = 0
 	for name, ioClass in pairs(set) do
 		local size = ioClass.size
-		ioSizes[name] = size
-		offsets[name] = totalSize
+		self.ioSizes[name] = size
+		self.offsets[name] = totalSize
 		
 		local data = { name = name, ioClass = ioClass, offset = totalSize}
 		for i = totalSize+1, totalSize+size do
-			map[i] = data
+			self.map[i] = data
 		end
 		totalSize = totalSize + size
 		
@@ -782,7 +848,7 @@ function IOMap:init(set)
 end
 
 function IOMap:getHandle(name, index)
-	local offset = offsets[name]
+	local offset = self.offsets[name]
 	return offset+index
 end
 
@@ -791,7 +857,7 @@ function IOMap:sizeOf(name)
 end
 	
 function IOMap:getAdjustedData(id)
-	local data = map[id]
+	local data = self.map[id]
 	local adjustedId =  id - data.offset
 	return data.ioClass, adjustedId
 end
@@ -843,10 +909,8 @@ InputSize = (BoxRadius*2+1)*(BoxRadius*2+1)
 
 TiledInput = Class(nil, {
 	sensed = {},
-	size = InputSize+1,
+	size = InputSize,
 }):implements(Input)
-
-Inputs = TiledInput.size
 
 function TiledInput:prepare()
 	currentGame:readValues()
@@ -896,6 +960,44 @@ end
 
 IORegistry:registerInput("TiledInput", TiledInput)
 -- End TiledInput
+
+-- Class BiasInput
+BiasInput = Class(nil, {
+	size = 1,
+}):implements(Input)
+
+function BiasInput:prepare()
+
+end
+
+function BiasInput:get(id)
+	return 1
+end
+
+IORegistry:registerInput("BiasInput", BiasInput)
+-- End BiasInput
+
+-- Class VelocityInput
+VelocityInput = Class(nil, {
+	xFactor = 1/20,
+	yFactor = 1/60,
+	size = 2,
+}):implements(Input)
+
+function VelocityInput:prepare()
+	currentGame:readValues()
+end
+
+function VelocityInput:get(id)
+	if id == 1 then
+		return currentGame.marioXSpeed*self.xFactor
+	else
+		return currentGame.marioYSpeed*self.yFactor
+	end
+end
+
+IORegistry:registerInput("VelocityInput", VelocityInput)
+-- End VelocityInput
 
 ---========================================---
 --- INPUT END
@@ -950,8 +1052,6 @@ ButtonOutput = Class(nil, {
 	buffer = {}
 }):implements(Output)
 
-Outputs = ButtonOutput.size
-
 function ButtonOutput:prepare()
 	for k, v in pairs(self.buffer) do
 		self.buffer[k] = 0
@@ -964,8 +1064,10 @@ end
 
 function ButtonOutput:send()
 	local buttons = {}
-	for o=1,Outputs do
-		local button = ButtonNames[o]
+	
+	local buttonNames = currentGame.buttonNames
+	for o=1,#buttonNames do
+		local button = buttonNames[o]
 		if self.buffer[o] ~= nil and self.buffer[o] > 0 then
 			buttons[button] = true
 		else
@@ -1020,9 +1122,9 @@ Filter = Interface(Runnable, {
 
 -- Class Neuron
 -- Neurons in network
-NEURON_INPUT = 0
-NEURON_HIDDEN = 1
-NEURON_OUTPUT = 2
+--NEURON_INPUT = 0
+--NEURON_HIDDEN = 1
+--NEURON_OUTPUT = 2
 
 Neuron = Class(nil, {
 	id = 0,
@@ -1046,15 +1148,15 @@ function Neuron:init(class, index, param)
 end
 
 function Neuron:makeInput(index, param)
-	return Neuron(NEURON_INPUT, index, param)
+	return Neuron(self.NEURON_INPUT, index, param)
 end
 
 function Neuron:makeOutput(index, param)
-	return Neuron(NEURON_OUTPUT, index, param)
+	return Neuron(self.NEURON_OUTPUT, index, param)
 end
 
 function Neuron:makeHidden()
-	return Neuron(NEURON_HIDDEN)
+	return Neuron(self.NEURON_HIDDEN)
 end
 
 function Neuron:addLinkInto(source, initWeight)
@@ -1069,6 +1171,10 @@ function Neuron:updateLink(source, weight)
 		end
 	end
 end
+
+function Neuron:isInput() return self.class == self.NEURON_INPUT end
+function Neuron:isOutput() return self.class == self.NEURON_OUTPUT end
+function Neuron:isHidden() return self.class == self.NEURON_HIDDEN end
 -- End Neuron
 
 -- Class NeuralNetwork
@@ -1256,7 +1362,8 @@ Genome = Class(nil, {
 
 Genome.newId = makeUniqueIdGenerator()
 
-function Genome:init()
+function Genome:init(name)
+	self.name = name
 	self.genes = {}
 	self.id = self.newId()
 	self.history = {}
@@ -1335,7 +1442,7 @@ end
 function Genome:makeOrganism(ioCollection)
 	local source = ioCollection:getInput(self.inputSpec)
 	local sink = ioCollection:getOutput(self.outputSpec)
-	
+
 	return self:makeBaseOrganism(self:getConfig(source, sink),
 		source, sink)
 end
@@ -1347,8 +1454,8 @@ NNGenome = Class(Genome, {
 })
 
 function NNGenome:init()
-	self.inputSpec = IOConfig({ {name = "TiledInput"} })
-	self.outputSpec = IOConfig({ {name = "ButtonOutput"} })
+	--self.inputSpec = IOConfig({ {name = "TiledInput", range = 170} })
+	--self.outputSpec = IOConfig({ {name = "ButtonOutput", range = 8} })
 	self.genes = {}
 	self.fitness = 0
 	self.adjustedFitness = 0
@@ -1455,20 +1562,23 @@ end
 function NNGenome:randomNeuron(nonInput)
 	local genes = self.genes
 	
+	local numInputs = self.inputSpec:getSize()
+	local numOutputs = self.outputSpec:getSize()
+	
 	local neurons = {}
 	if not nonInput then
-		for i=1,Inputs do
+		for i=1,numInputs do
 			neurons[i] = true
 		end
 	end
-	for o=1,Outputs do
-		neurons[Inputs+o] = true
+	for o=1,numOutputs  do
+		neurons[numInputs+o] = true
 	end
 	for i=1,#genes do
-		if (not nonInput) or genes[i].into > Inputs then
+		if (not nonInput) or genes[i].into > numInputs then
 			neurons[genes[i].into] = true
 		end
-		if (not nonInput) or genes[i].out > Inputs then
+		if (not nonInput) or genes[i].out > numInputs then
 			neurons[genes[i].out] = true
 		end
 	end
@@ -1486,7 +1596,7 @@ function NNGenome:randomNeuron(nonInput)
 		end
 	end
    
-	return 0
+	return nil
 end
  
 function NNGenome:containsLink(link)
@@ -1551,17 +1661,6 @@ function NNGenome:weights(genes1, genes2)
 	end
    
 	return sum / coincident
-end
-
-function NNGenome:makeStarterGenome()
-	local genome = NNGenome()
-	
-	local breeder = NNBreeder():addParam({crossoverChance = CrossoverChance})
-	genome.maxneuron = Inputs + Outputs
-	
-	breeder:mutate(genome)
-   
-	return genome
 end
 
 -- End NNGenome
@@ -1630,11 +1729,19 @@ function MutationWithRate:mutate(genome)
 end
 -- End MutationWithRate
 
--- Abstract class Breeder
+-- Interface IBreeder
+IBreeder = Interface(nil, {
+	addMutation = abstractFunction,
+	addParam = abstractFunction,
+	breed = abstractFunction
+})
+-- End IBreeder
+
+-- Abstract Class Breeder
 Breeder = Class(nil, {
 	param = {},
 	mutations = {}
-})
+}):implements(IBreeder)
 
 function Breeder:init()
 	self.param = shallowCopy(self._base.param)
@@ -1692,6 +1799,7 @@ function Breeder:reproduce(genome, pool)
 	end
 	if partner == nil then
 		child = self:asexualReproduction(genome)
+
 	else
 		child = self:sexualReproduction(genome, partner)
 	end
@@ -1704,7 +1812,13 @@ function Breeder:mutate(genome)
 	end
 end
 
-function Breeder:breed(genome, pool)
+function Breeder:breed(organism, organisms)
+	local genome = organism.genome
+
+	local pool = {}
+	for _, organism in ipairs(organisms) do
+		table.insert(pool, organism.genome)
+	end
 	local child = self:reproduce(genome, pool)
 	self:mutate(child)
 	return child
@@ -1735,13 +1849,16 @@ NNBreeder:addMutation("connections",
 function linkMutation(param, genome)
 	local neuron1 = genome:randomNeuron(false) --randomNeuron(genome.genes, false)
 	local neuron2 = genome:randomNeuron(true)  --randomNeuron(genome.genes, true)
-	 
+	
+	if not neuron1 or not neuron2 then return end
 	local newLink = NNGenome:makeGene()
-	if neuron1 <= Inputs and neuron2 <= Inputs then
+	local numInputs = genome.inputSpec:getSize()
+	
+	if neuron1 <= numInputs and neuron2 <= numInputs then
 			--Both input nodes
 			return
 	end
-	if neuron2 <= Inputs then
+	if neuron2 <= numInputs then
 			-- Swap output and input
 			local temp = neuron1
 			neuron1 = neuron2
@@ -1750,8 +1867,11 @@ function linkMutation(param, genome)
 
 	newLink.into = neuron1
 	newLink.out = neuron2
-	if param.forceBias then
-			newLink.into = Inputs
+	if param.forceType then
+		local layout = genome.inputSpec:layoutInfo(param.forceType)
+		if layout then
+			newLink.into = math.random(layout.offset, layout.offset+layout.size-1)
+		end
 	end
    
 	if genome:containsLink(newLink) then
@@ -1763,9 +1883,11 @@ function linkMutation(param, genome)
 	table.insert(genome.genes, newLink)
 end
 NNBreeder:addMutation("link",
-	MutationWithRate(linkMutation):addParam({forceBias = false}))
+	MutationWithRate(linkMutation):addParam({forceType = nil}))
 NNBreeder:addMutation("bias",
-	MutationWithRate(linkMutation):addParam({forceBias = true}))
+	MutationWithRate(linkMutation):addParam({forceType = "BiasInput"}))
+NNBreeder:addMutation("vel",
+	MutationWithRate(linkMutation):addParam({forceType = "VelocityInput"}))
 	
 function nodeMutation(param, genome)
 	if #genome.genes == 0 then
@@ -1821,6 +1943,8 @@ function NNBreeder:asexualReproduction(genome)
 end
 
 function NNBreeder:sexualReproduction(g1, g2)
+	--g1 = g1.genome
+	--g2 = g2.genome
 	if g2.fitness > g1.fitness then
 			tempg = g1
 			g1 = g2
@@ -1828,7 +1952,9 @@ function NNBreeder:sexualReproduction(g1, g2)
 	end
 
 	local child = NNGenome()
-   
+	child.inputSpec = g1.inputSpec:copy()
+	child.outputSpec = g1.outputSpec:copy()
+	
 	local innovations2 = {}
 	for i=1,#g2.genes do
 			local gene = g2.genes[i]
@@ -1893,28 +2019,226 @@ end
 ---========================================---
 
 ---========================================---
+--- ORGANISM
+---
+--- Acts and breed
+--- Interface between the genome and the simulation
+---========================================---
+
+-- Interface Organism
+Organism = Interface(nil,{
+	name = "?",
+	makeDefault = abstractFunction, --()
+	birth = abstractFunction, -- ()
+	act = abstractFunction,	-- ()
+	breed = abstractFunction, -- (species)
+	die = abstractFunction, -- () for cleanup
+	difference = abstractFunction, -- for species
+})
+-- End Organism
+
+-- Abstract Class BasicOrganism
+BasicOrganism = Class(nil, {
+	genome = {},
+	phenotype = {},
+	breeder = nil,
+	executor = nil,
+	fitness = 0
+}):implements(Organism)
+
+function BasicOrganism:init(genome)
+	self.genome = genome
+	self.name = genome.name
+	self.fitness = 0
+	self.globalRank = 0
+end
+
+function BasicOrganism:makeDefault()
+	local default = self(self.defaultGenome:copy())
+	default:mutate()
+	return default
+end
+
+function BasicOrganism:birth(ioRegistry)
+	local source = ioRegistry:getInput(self.genome.inputSpec)
+	local sink = ioRegistry:getOutput(self.genome.outputSpec)
+	self.phenotype = self:makePhenotype(source, sink)
+	self.executor = self:makeExecutor(self.phenotype, source, sink)
+	self.executor:reset()
+end
+
+function BasicOrganism:act()
+	TiledInput:prepare()
+	self.executor:run()
+end
+
+function BasicOrganism:breed(species)
+	self.breeder = self:makeBreeder()
+	return self.breeder:breed(self, species)
+end
+
+function BasicOrganism:mutate()
+	self.breeder = self:makeBreeder()
+	self.breeder:mutate(self.genome)
+	return self.genome
+end
+
+function BasicOrganism:die()
+	self.executor = nil
+	self.phenotype = nil
+end
+
+function BasicOrganism:difference(organism2)
+	return self.genome:difference(organism2.genome)
+end
+
+function BasicOrganism:getGenome()
+	return self.genome
+end
+-- End BasicOrganism
+
+-- Class NNOrganism
+NNOrganism = Class(BasicOrganism, {
+	
+})
+-- End NNOrganism
+
+NNOrganism.defaultGenome = (function()
+	local genome = deepMergeInto(NNGenome(), {
+		inputSpec = IOConfig({
+			{name = "TiledInput", range = 169},
+			{name = "VelocityInput", range = 2},
+			{name = "BiasInput", range = 1}
+		}),
+		outputSpec = IOConfig({ {name = "ButtonOutput", range = 8} }),
+		genes = {},
+		fitness = 0,
+		adjustedFitness = 0,
+		network = {},
+		maxneuron = 10,
+		globalRank = 0,
+		mutationRates = {
+			connections = MutateConnectionsChance,
+			link = LinkMutationChance,
+			bias = BiasMutationChance,
+			vel = VelMutationChance,
+			node = NodeMutationChance,
+			enable = EnableMutationChance,
+			disable = DisableMutationChance,
+			step = StepSize,
+		},
+		geneNeuronMap = {}
+	})
+	genome.maxneuron = genome.inputSpec:getSize()
+	genome.maxneuron = genome.maxneuron + genome.outputSpec:getSize()
+	return genome
+end)()
+
+function NNOrganism:makePhenotype(source, sink)
+	local network = NeuralNetwork()
+	
+	local id
+	local genome = self.genome
+	genome.geneNeuronMap = {}
+	local idMap = genome.geneNeuronMap
+	
+	local neuronCount = 1
+	for name, id, handle in genome.inputSpec:iterator(source) do
+		id = network:addNeuron(Neuron:makeInput(handle)).id
+		idMap[neuronCount] = id
+		neuronCount = neuronCount + 1
+	end
+
+	
+	for name, id, handle in genome.outputSpec:iterator(sink) do
+		id = network:addNeuron(Neuron:makeOutput(handle)).id
+		idMap[neuronCount] = id
+		neuronCount = neuronCount + 1
+	end
+	
+	table.sort(genome.genes, function (a,b)
+			return (a.out < b.out)
+	end)
+	
+	for i=1,#genome.genes do
+		local gene = genome.genes[i]
+		
+		if gene.enabled then
+			local id = idMap[gene.out]
+			if id == nil then
+					id = network:addNeuron(Neuron:makeHidden()).id
+					idMap[gene.out] = id
+			end
+			
+			local neuron = network:find(id)
+
+			local id = idMap[gene.into]
+			if id == nil then
+				id = network:addNeuron(Neuron:makeHidden()).id
+				idMap[gene.into] = id
+			end
+			
+			neuron:addLinkInto(idMap[gene.into], gene.weight)
+			--table.insert(neuron.incoming, gene)
+		end
+	end
+	
+	self.network = network
+--DEBUG(network)
+	return network
+end
+
+function NNOrganism:makeExecutor(phenotype, source, sink)
+	return SimpleNNExecutor(phenotype, source, sink)
+end
+
+function NNOrganism:makeBreeder()
+	return NNBreeder():addParam({crossoverChance = CrossoverChance})
+end
+
+---========================================---
+--- ORGANISM END
+---========================================---
+
+---========================================---
 --- SPECIES
+---
+--- Data for groups of similar organisms
 ---========================================---
 
 Species = Class(nil, {
-	genomes = {}
+	organisms = {},
+	name = "?"
 })
 
-function Species:init()
+function Species:init(name)
+	self.name = name
 	self.topFitness = 0
 	self.staleness = 0
-	self.genomes = {}
+	self.organisms = {}
 	self.averageFitness = 0
 end
 
 function Species:calculateAverageFitness()
 	local total = 0
 
-	for _, genome in ipairs(self.genomes) do
-		total = total + genome.globalRank
+	for _, organism in ipairs(self.organisms) do
+		total = total + organism.globalRank
 	end
 
-	self.averageFitness = total / #self.genomes
+	self.averageFitness = total / #self.organisms
+end
+
+function Species:addOrganism(organism)
+	table.insert(self.organisms, organism)
+end
+
+function Species:organismIter()
+	local i = 0
+	return function ()
+		i = i + 1
+		return self.organisms[i], i
+	end
 end
 
 ---========================================---
@@ -1932,7 +2256,7 @@ end
 Population = Class(nil, {
 	maxSize = 50,
 	species = {},
-	genomes = {},
+	organisms = {},
 	maxFitness,
 })
 
@@ -1944,27 +2268,38 @@ function Population:init(maxSize)
 	self.maxSize = maxSize
 end
 
-function Population:addGenome(genome)
+function Population:addOrganism(organism)
 	local foundSpecies = false
+	
 	for s=1,#self.species do
 		local species = self.species[s]
-		if not foundSpecies and self:isInSameSpecies(genome, species.genomes[1]) then
-			table.insert(species.genomes, genome)
+		if not foundSpecies and self:isInSameSpecies(organism, species.organisms[1]) then
+			species:addOrganism(organism)
+			organism.name = #species.organisms
 			foundSpecies = true
 		end
 	end
    
 	if not foundSpecies then
-			local childSpecies = Species()
-			table.insert(childSpecies.genomes, genome)
+			local childSpecies = Species(#self.species+1)
+			childSpecies:addOrganism(organism)
 			table.insert(self.species, childSpecies)
+			organism.name = 1
 	end
 	
-	table.insert(self.genomes, genome)
+	table.insert(self.organisms, organism)
 end
 
-function Population:isInSameSpecies(genome1, genome2)
-		local diff = genome1:difference(genome2)
+function Population:speciesIter()
+	local i = 0
+	return function()
+		i = i + 1
+		return self.species[i], i
+	end
+end
+
+function Population:isInSameSpecies(organism1, organism2)
+		local diff = organism1:difference(organism2)
         return diff < DeltaThreshold
 end
 
@@ -1972,8 +2307,8 @@ function Population:rankGlobally()
         local global = {}
         for s = 1,#self.species do
                 local species = self.species[s]
-                for g = 1,#species.genomes do
-                        table.insert(global, species.genomes[g])
+                for g = 1,#species.organisms do
+                        table.insert(global, species.organisms[g])
                 end
         end
         table.sort(global, function (a,b)
@@ -1984,7 +2319,7 @@ function Population:rankGlobally()
                 global[g].globalRank = g
         end
 end
- 
+
 function Population:calculateAverageFitness(species)
 		species:calculateAverageFitness()
 end
@@ -2002,28 +2337,33 @@ end
 function Population:cullSpecies(cutToOne)
         for s = 1,#self.species do
                 local species = self.species[s]
-               
-                table.sort(species.genomes, function (a,b)
+              
+                table.sort(species.organisms, function (a,b)
                         return (a.fitness > b.fitness)
                 end)
                
-                local remaining = math.ceil(#species.genomes/2)
+                local remaining = math.ceil(#species.organisms/2)
                 if cutToOne then
                         remaining = 1
                 end
-                while #species.genomes > remaining do
-                        table.remove(species.genomes)
+                while #species.organisms > remaining do
+                        table.remove(species.organisms)
                 end
         end
 end
 
 function Population:breedChild(species)
-        local child = {}
-		local original = species.genomes[math.random(1, #species.genomes)]
-
-		local breeder = NNBreeder():addParam({crossoverChance = CrossoverChance})
-		
-        return breeder:breed(original, species.genomes)
+	local child = {}
+	local organism = species.organisms[math.random(1, #species.organisms)]
+	
+	--if organism == nil then
+	--	organism = NNOrganism(original)
+	--end
+	return organism:breed(species.organisms)
+	
+	--local breeder = NNBreeder():addParam({crossoverChance = CrossoverChance})
+	
+	--return breeder:breed(original, species.genomes)
 end
 
 function Population:removeStaleSpecies()
@@ -2032,12 +2372,11 @@ function Population:removeStaleSpecies()
         for s = 1,#self.species do
                 local species = self.species[s]
                
-                table.sort(species.genomes, function (a,b)
+                table.sort(species.organisms, function (a,b)
                         return (a.fitness > b.fitness)
                 end)
-               
-                if species.genomes[1].fitness > species.topFitness then
-                        species.topFitness = species.genomes[1].fitness
+                if species.organisms[1].fitness > species.topFitness then
+                        species.topFitness = species.organisms[1].fitness
                         species.staleness = 0
                 else
                         species.staleness = species.staleness + 1
@@ -2091,12 +2430,12 @@ function Population:newGeneration()
         end
         for c=1,#children do
                 local child = children[c]
-                self:addGenome(child)
+                self:addOrganism(NNOrganism(child))
         end
        
         self.generation = self.generation + 1
        
-		local filename = UIConfig:getSaveLoadFile()
+		local filename = ConfigUI:getSaveLoadFile()
         self:writeFile("backup." .. self.generation .. "." .. filename)
 end
 
@@ -2108,8 +2447,9 @@ function Population:writeFile(filename)
 	for n,species in pairs(self.species) do
 		file:write(species.topFitness .. "\n")
 		file:write(species.staleness .. "\n")
-		file:write(#species.genomes .. "\n")
-		for m,genome in pairs(species.genomes) do
+		file:write(#species.organisms .. "\n")
+		for m,organism in pairs(species.organisms) do
+			local genome = organism.genome
 			file:write(genome.fitness .. "\n")
 			file:write(genome.maxneuron .. "\n")
 			for mutation,rate in pairs(genome.mutationRates) do
@@ -2136,7 +2476,7 @@ function Population:writeFile(filename)
 end
  
 function Population:savePool()
-	local filename = UIConfig:getSaveLoadFile()
+	local filename = ConfigUI:getSaveLoadFile()
 	self:writeFile(filename)
 end
 
@@ -2145,17 +2485,20 @@ function Population:loadFile(filename)
 	self = Population(PopulationMax)
 	self.generation = file:read("*number")
 	self.maxFitness = file:read("*number")
-	UIConfig:setMaxFitness(self.maxFitness)
+	ConfigUI:setMaxFitness(self.maxFitness)
 	local numSpecies = file:read("*number")
 	for s=1,numSpecies do
-		local species = Species()
+		local species = Species(i)
+
 		table.insert(self.species, species)
 		species.topFitness = file:read("*number")
 		species.staleness = file:read("*number")
 		local numGenomes = file:read("*number")
 		for g=1,numGenomes do
 			local genome = NNGenome()
-			table.insert(species.genomes, genome)
+			local organism = NNOrganism(genome)
+			
+			species:addOrganism(organism)
 			genome.fitness = file:read("*number")
 			genome.maxneuron = file:read("*number")
 			local line = file:read("*line")
@@ -2187,7 +2530,7 @@ function Population:loadFile(filename)
 end
 
 function Population:loadPool()
-	local filename = UIConfig:getSaveLoadFile()
+	local filename = ConfigUI:getSaveLoadFile()
 	self:loadFile(filename)
 end
 
@@ -2195,8 +2538,7 @@ function Population:makeStarter()
 	local pop = Population(PopulationMax)
 	
 	for i=1,PopulationMax do
-		local basic = NNGenome:makeStarterGenome()
-		pop:addGenome(basic)
+		pop:addOrganism(NNOrganism:makeDefault())
 	end
 
 	return pop
@@ -2206,9 +2548,9 @@ function Population:countMeasured()
 	local measured = 0
 	local total = 0
 	for _,species in pairs(self.species) do
-		for _,genome in pairs(species.genomes) do
+		for _,organism in pairs(species.organisms) do
 			total = total + 1
-			if genome.fitness ~= 0 then
+			if organism.fitness ~= 0 then
 				measured = measured + 1
 			end
 		end
@@ -2286,13 +2628,15 @@ end
 -- Off by one because of an extra step?
 function RightmostJudge:measure()
 	local frame = self.frame - 1
-	local fitness = math.floor(self.rightmost -  frame / 2 - self.timeout/2)
+	local rightmostBonusFactor = 1
+	local fitness = math.floor(rightmostBonusFactor*self.rightmost -  frame / 2 - self.timeout/2)
 	return fitness
 end
 
 function RightmostJudge:finalMeasurement()
 	local frame = self.frame - 1
-	local fitness = self.rightmost - frame / 2
+	local rightmostBonusFactor = 1
+	local fitness = rightmostBonusFactor*self.rightmost - frame / 2
 	
 	if self.rightmost > currentGame.rightEnd then
 		fitness = fitness + 1000
@@ -2304,7 +2648,8 @@ function RightmostJudge:finalMeasurement()
 end
 
 function RightmostJudge:shouldEnd()
-	return self.timeout <= 0
+	local fitness = self:measure()
+	return self.timeout <= 0 or fitness < -100
 end
 
 ---========================================---
@@ -2360,11 +2705,14 @@ end
 -- Class GenomeSimulation
 GenomeSimulation = Class(BasicSimulation)
 
-function GenomeSimulation:init(genome, evaluator)
+function GenomeSimulation:init(organism, evaluator)
 	self:_baseInit()
 	
 	self.done = false
-	self.genome = genome
+	
+	self.organism = organism
+
+	--self.organism = NNOrganism(genome)
 	self.evaluator = evalutor
 	self.fitness = 0
 	self.maxFitness = 0
@@ -2379,15 +2727,12 @@ function GenomeSimulation:setup(param)
 	self.timeout = TimeoutConstant
 	JoypadUtil:clear()
 	
-	local genome = self.genome
+	--local organism = genome:makeOrganism(IORegistry)
+	--organism:reset()
+	self.organism:birth(IORegistry)
 	
-	local organism = genome:makeOrganism(IORegistry)
-	organism:reset()
-	
-	self.evaluator:setOrganism(organism)
+	self.evaluator:setOrganism(self.organism)
 	self.evaluator:setup()
-	
-	genome.organism = organism
 	
 	self:runEvaluation()
 end
@@ -2397,12 +2742,7 @@ function GenomeSimulation:isDone()
 end
 
 function GenomeSimulation:runEvaluation()
-	local genome = self.genome
-	
-	--inputs = getInputs()
-	TiledInput:prepare()
-	
-	genome.organism:run()
+	self.organism:act()
 end
 
 function GenomeSimulation:evaluate()
@@ -2413,21 +2753,22 @@ function GenomeSimulation:evaluate()
 end
 
 function GenomeSimulation:finish()
-	local genome = self.genome
 
 	local fitness = self.evaluator:finalMeasurement()
-	genome.fitness = fitness
+	self.organism.fitness = fitness
 	self.fitness = fitness
 	
 	-- TODO: Don't reference popSim
 	local pop = popSim.population
 	if fitness > pop.maxFitness then
 			pop.maxFitness = fitness
-			UIConfig:setMaxFitness(pop.maxFitness)
+			ConfigUI:setMaxFitness(pop.maxFitness)
 			
-			local filename = UIConfig:getSaveLoadFile()
+			local filename = ConfigUI:getSaveLoadFile()
 			pop:writeFile("backup." .. pop.generation .. "." .. filename)
 	end
+	
+	self.organism:die()
 end
 
 function GenomeSimulation:getCurrentFitness()
@@ -2446,27 +2787,25 @@ function PopulationSimulation:init(population, genomeSimFactory)
 	self.genomeSimulation = nil
 	self.genomeSimDone = false
 	
-	self.currentSpecies = 1
-	self.currentGenome = 1
+	self.speciesIter = nil
+	self.organismIter = nil
+	self.activeSpecies = nil
+	self.activeOrganism = nil
+	self:reset()
 	
 	return self
 end
 
-function PopulationSimulation:setup(param)
-	--initializeRun()
-end
-
 function PopulationSimulation:isDone()
-	return self.currentSpecies > #self.population.species
+	return self.activeSpecies == nil
 end
 
 function PopulationSimulation:genomeSimDoneHandler(sim)
 	self.genomeSimDone = true
 	
-	console.writeline("Gen " .. self.population.generation .. " species " .. self.currentSpecies .. " genome " .. self.currentGenome .. " fitness: " .. sim.fitness)
+	console.writeline("Gen " .. self.population.generation .. " species " .. self.activeSpecies.name .. " genome " .. self.activeOrganism.name .. " fitness: " .. sim.fitness)
 	
-	self.currentSpecies = 1
-	self.currentGenome = 1
+	self:reset()
 end
 
 function PopulationSimulation:evaluate()
@@ -2480,6 +2819,7 @@ function PopulationSimulation:evaluate()
 	
 	if self.genomeSimDone then
 		self.genomeSimulation = nil
+		
 		while self:fitnessAlreadyMeasured() do
 			self:nextGenome()
 		end
@@ -2489,48 +2829,60 @@ end
 
 
 function PopulationSimulation:reset()
-	popSim.currentSpecies = 1
-	popSim.currentGenome = 1
+	self.speciesIter = self.population:speciesIter()
+	self.activeSpecies = self.speciesIter()
+	self.organismIter = self.activeSpecies:organismIter()
+	self.activeOrganism = self.organismIter()
+
+	--self.currentSpecies = 1
+	--self.currentGenome = 1
 end
 
 function PopulationSimulation:finish()
 	self.population:newGeneration()
 	
-	popSim.currentSpecies = 1
-	popSim.currentGenome = 1
+	self:reset()
 end
 
 function PopulationSimulation:nextGenome()
 	local population = self.population
+	--[[
 	self.currentGenome = self.currentGenome + 1
 	if self.currentGenome > #population.species[self.currentSpecies].genomes then
 		self.currentGenome = 1
 		self.currentSpecies = self.currentSpecies+1
+	end]]--
+	
+	self.activeOrganism = self.organismIter()
+	
+	if self.activeOrganism == nil then
+		self.activeSpecies = self.speciesIter()
+		if self.activeSpecies ~= nil then
+			self.organismIter = self.activeSpecies:organismIter()
+			self.activeOrganism = self.organismIter()
+		end
 	end
 end
 
 function PopulationSimulation:fitnessAlreadyMeasured()
-	local species = self.population.species[self.currentSpecies]
+	local species = self.activeSpecies
 	
-	if species == nil then return false
-	end
+	if species == nil then return false end
 	
-	local genome = species.genomes[self.currentGenome]
-  --writeTableToConsole(genome)
-	return genome.fitness ~= 0
+	local organism = self.activeOrganism
+	return organism.fitness ~= 0
 end
 
 function PopulationSimulation:initializeGenomeSim()
-	savestate.load("DP1.state");
+	savestate.load("DP1.state"); -- TODO remove hardcoded
 	--savestate.load(Filename);
 	--rightmost = 0
 	--timeout = TimeoutConstant
 	JoypadUtil:clear()
 	
-	local species = self.population.species[self.currentSpecies]
-	local genome = species.genomes[self.currentGenome]
-	
-	local genomeSimulation = GenomeSimulation(genome, nil, nil)
+	local organism = self.activeOrganism
+
+	local genomeSimulation = GenomeSimulation(organism, RightmostJudge)
 	genomeSimulation:setup()
 	genomeSimulation:step()
 	self.genomeSimulation = genomeSimulation
@@ -2541,22 +2893,25 @@ function PopulationSimulation:initializeGenomeSim()
 		self:genomeSimDoneHandler(sim)
 	end)
 end
-
+--[[
 function PopulationSimulation:activeGenome()
-	local species = self.population.species[self.currentSpecies]
-	local genome = species.genomes[self.currentGenome]
+	--local species = self.population.species[self.currentSpecies]
+	--local genome = species.genomes[self.currentGenome]
 	
-	return genome
-end
+	return self.activeGenome
+end]]--
 
 function PopulationSimulation:getCurrentSpecies()
-	return self.currentSpecies
+	--return self.currentSpecies
+	return self.activeSpecies.name
 end
 
 function PopulationSimulation:getCurrentGenome()
-	return self.currentGenome
+	return self.activeOrganism.name
+	--return self.currentGenome
 end
 
+-- TODO: remove/fix
 function PopulationSimulation:getFrame()
 	local frame = 1
 	if self.genomeSimulation then
@@ -2572,28 +2927,25 @@ function PopulationSimulation:getCurrentFitness()
 	end
 	
 	return genomeSim:getCurrentFitness()
-	
 end
 
 function PopulationSimulation:playTop()
 	local maxfitness = 0
-	local maxs, maxg
-	for s,species in pairs(self.population.species) do
-		for g,genome in pairs(species.genomes) do
-			if genome.fitness > maxfitness then
-				maxfitness = genome.fitness
-				maxs = s
-				maxg = g
+	
+	for species,s in self.population:speciesIter() do
+		for organism,g in species:organismIter() do
+			if organism.fitness > maxfitness then
+				maxfitness = organism.fitness
+				self.activeSpecies = species
+				self.activeOrganism = organism
 			end
 		end
 	end
-   
-	self.currentSpecies = maxs
-	self.currentGenome = maxg
+	
 	self.maxFitness = maxfitness
 	self.genomeSimulation = nil
 	
-	UIConfig:setMaxFitness(self.maxFitness)
+	ConfigUI:setMaxFitness(self.maxFitness)
 	return
 end
 -- End PopulationSimulation
@@ -2735,12 +3087,105 @@ function NNUI:drawCell(cell)
 	gui.drawBox(x-2,y-2,x+2,y+2,opacity,color)
 end
 
+function NNUI:drawTiledInput(x, y, offset)
+	local i = offset
+	local network = self.network
+	
+	if self.needCellGeneration then
+		for row = 0, 2*BoxRadius do
+			for col = 0, 2*BoxRadius do
+				cell = {
+					x = x +2 + 5*col,
+					y = y +2 + 5*row,
+					neuron = network.inputNeurons[i],
+					value = network.inputNeurons[i].value,
+					requireInput = true,
+					fixed = true
+				}
+				table.insert(self.inputCells, cell)
+				table.insert(self.cells, cell)
+				i = i + 1
+			end
+		end
+	end
+	
+	gui.drawBox(x, y, x+5+2*BoxRadius*5-1, y+5+2*BoxRadius*5-1,0xFF000000, 0x80808080)
+	gui.drawBox(x+29 +2,y+31+2,x+31+2,y+38+2,0x00000000,0x80FF0000)
+	
+	return x, y + 5+2*BoxRadius*5+5
+end
+
+function NNUI:drawBias(x, y, offset)
+	local network = self.network
+	if self.needCellGeneration then
+		local biasCell = {
+			x = x+60+2,
+			y = y,
+			neuron = network.inputNeurons[offset],
+			value = network.inputNeurons[offset].value,
+			fixed = true
+		}
+		table.insert(self.inputCells, biasCell)
+		table.insert(self.cells, biasCell)
+	end
+	
+	return x, y+10
+end
+
+function NNUI:drawVelocity(x, y, offset)
+	local network = self.network
+	if self.needCellGeneration then
+		local vxCell = {
+			x = x+30+2,
+			y = y,
+			neuron = network.inputNeurons[offset],
+			value = network.inputNeurons[offset].value,
+			fixed = true
+		}
+		table.insert(self.inputCells, vxCell)
+		table.insert(self.cells, vxCell)
+		
+		local vyCell = {
+			x = x+60+2,
+			y = y,
+			neuron = network.inputNeurons[offset+1],
+			value = network.inputNeurons[offset+1].value,
+			fixed = true
+		}
+		table.insert(self.inputCells, vyCell)
+		table.insert(self.cells, vyCell)
+	end
+	
+	gui.drawText(x+15, y-5, "Vx", 0xFF000000, 8)
+	gui.drawText(x+45, y-5, "Vy", 0xFF000000, 8)
+	return x, y+10
+end
+
+NNUI.inputDrawers = {
+	TiledInput = "drawTiledInput",
+	BiasInput = "drawBias",
+	VelocityInput = "drawVelocity"
+}
+
 function NNUI:drawInput(x, y)
 	local network = self.network
 	
 	if self.needCellGeneration then
 		self.inputCells = {}
+	end
 	
+	local inputConfig = self.inputConfig
+	for _, data in ipairs(inputConfig:getData()) do
+		local name = data.name
+		local layout = inputConfig:layoutInfo(name)
+		local offset, size = layout.offset, layout.size
+		
+		local drawer = self.inputDrawers[name]
+		x, y = self[drawer](self, x, y, offset, size)
+	end
+	--x, y = self:drawTiledInput(x, y)
+	--x, y = self:drawBias(x, y)
+	--[[
 		local i = 1
 		for row = 0, 2*BoxRadius do
 			for col = 0, 2*BoxRadius do
@@ -2766,13 +3211,13 @@ function NNUI:drawInput(x, y)
 		}
 		table.insert(self.inputCells, biasCell)
 		table.insert(self.cells, biasCell)
-	end
+	end--]]
 	
-	gui.drawBox(50-BoxRadius*5-3,70-BoxRadius*5-3,50+BoxRadius*5+2,70+BoxRadius*5+2,0xFF000000, 0x80808080)
 	
 	for _, cell in ipairs(self.inputCells) do
 		cell.value = cell.neuron.value
-		if cell.value ~= 0 then
+		-- Show unless value is zero and require input
+		if cell.value ~= 0 or not cell.requireInput then
 			self:drawCell(cell)
 		end
 	end
@@ -2784,8 +3229,8 @@ function NNUI:drawOutput(x, y)
 	if self.needCellGeneration then
 		self.outputCells = {}
 		
-		local i = Inputs
-		for o = 1,Outputs do
+		local i = #network.inputNeurons
+		for o = 1,#network.outputNeurons do
 			cell = {
 				x = 220,
 				y = 30 + 8 * o,
@@ -2917,15 +3362,19 @@ function NNUI:drawLinks()
 end
 
 function NNUI:drawMario()
-	gui.drawBox(49,71,51,78,0x00000000,0x80FF0000)
 end
 
 function NNUI:draw()
-	local genome = popSim:activeGenome()
-	if genome.organism == nil then return end
-	local network = genome.organism.neuralNetwork
+	local organism = popSim.activeOrganism
+	--if genome.organism == nil then return end
+	
+	local network = organism.network
+	
+	if network == nil then return end
 	
 	if network ~= self.network then
+		local inputConfig = organism.genome.inputSpec
+		self.inputConfig = inputConfig
 		self.needCellGeneration = true
 		self.cells = {}
 		self.network = network
@@ -2934,7 +3383,7 @@ function NNUI:draw()
 		self.needCellGeneration = false
 	end
 	
-	self:drawInput()
+	self:drawInput(20, 40)
 	self:drawOutput()
 	self:drawHidden()
 	self:drawLinks()
@@ -2946,9 +3395,9 @@ end
 MutationRatesUI = Class(BasicUI)
 
 function MutationRatesUI:draw()
-	local genome = popSim:activeGenome()
+	-- TODO fix encapsulation break
+	local genome = popSim.activeOrganism:getGenome()
 	local pos = 100
-DEBUG("mutat")
 	local color = 0xFF000000
 	color = 0xFFFFFFFF
 	for mutation,rate in pairs(genome.mutationRates) do
@@ -2979,12 +3428,12 @@ function BannerUI:draw()
 end
 -- End BannerUI
 
--- Class UIConfig
-UIConfig = Class(nil,{
+-- Class ConfigUI
+ConfigUI = Class(nil,{
 	form = nil
 })
 
-function UIConfig:show()
+function ConfigUI:show()
 	local form = forms.newform(200, 260, "Fitness")
 	self.form = form
 	local pop = popSim.population
@@ -3011,28 +3460,28 @@ function UIConfig:show()
 	self.hideBannerCheck = forms.checkbox(form, "Hide Banner", 5, 190)
 end
 
-function UIConfig:dispose()
+function ConfigUI:dispose()
 	if self.form then
 		forms.destroy(self.form)
 	end
 end
 
-function UIConfig:showMutationRates()
+function ConfigUI:showMutationRates()
 	local form = self.form
 	return form and forms.ischecked(self.showMutationRatesCheck)
 end
 
-function UIConfig:showNetwork()
+function ConfigUI:showNetwork()
 	local form = self.form
 	return form and forms.ischecked(self.showNetworkCheck)
 end
 
-function UIConfig:hideBanner()
+function ConfigUI:hideBanner()
 	local form = self.form
 	return form and forms.ischecked(self.hideBannerCheck)
 end
 
-function UIConfig:getSaveLoadFile()
+function ConfigUI:getSaveLoadFile()
 	local form = self.form
 	if form ~= nil then
 		return forms.gettext(self.saveLoadFileBox)
@@ -3041,17 +3490,17 @@ function UIConfig:getSaveLoadFile()
 	end
 end
 
-function UIConfig:setMaxFitness(fitness)
+function ConfigUI:setMaxFitness(fitness)
 	if self.form == nil then return end
 	forms.settext(self.maxFitnessLabel, "Max Fitness: " .. math.floor(fitness))
 end
--- End UIConfig
+-- End ConfigUI
 
 ---========================================---
 --- UI END
 ---========================================---
 
-PopulationMax = 10
+PopulationMax = 200
 DeltaDisjoint = 2.0
 DeltaWeights = 0.4
 DeltaThreshold = 1.0
@@ -3064,6 +3513,7 @@ CrossoverChance = 0.75
 LinkMutationChance = 2.0
 NodeMutationChance = 0.50
 BiasMutationChance = 0.40
+VelMutationChance = 0.10
 StepSize = 0.1
 DisableMutationChance = 0.4
 EnableMutationChance = 0.2
@@ -3077,26 +3527,25 @@ newInnovation = makeUniqueIdGenerator()
 popSim = nil
 popSim = PopulationSimulation(Population:makeStarter(), nil)
 
-UIConfig:show()
+-- Show Form
+ConfigUI:show()
 
 event.onexit(function ()
-	UIConfig:dispose()
+	ConfigUI:dispose()
 end)
 
 while true do
-	local genome = popSim:activeGenome()
-
-	if UIConfig:showNetwork() then
+	if ConfigUI:showNetwork() then
 		NNUI:draw()
 	end
-   if UIConfig:showMutationRates() then
+   if ConfigUI:showMutationRates() then
 		MutationRatesUI:draw()
 	end
 	
 	popSim:step()
 	JoypadUtil:apply()
 
-	if not UIConfig:hideBanner()then
+	if not ConfigUI:hideBanner()then
 		BannerUI:draw()
 	end
 

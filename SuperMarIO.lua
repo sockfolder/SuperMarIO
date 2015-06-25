@@ -38,7 +38,9 @@ function Pickle:pickle_(root)
     local t = self._refToTable[savecount]
     s = s.."{\n"
     for i, v in pairs(t) do
-        s = string.format("%s[%s]=%s,\n", s, self:value_(i), self:value_(v))
+		if type(v) ~= "function" then -- Added condition - sockfolder
+			s = string.format("%s[%s]=%s,\n", s, self:value_(i), self:value_(v))
+		end
     end
     s = s.."},\n"
   end
@@ -52,7 +54,7 @@ function Pickle:value_(v)
   elseif vtype == "number" then return v
   elseif vtype == "boolean" then return tostring(v)
   elseif vtype == "table" then return "{"..self:ref_(v).."}"
-  else --error("pickle a "..type(v).." is not supported")
+  else error("pickle a "..type(v).." is not supported")
   end  
 end
 
@@ -232,14 +234,46 @@ function writeTableToConsole(t)
 end
 
 -- Class System
--- Note: 
+
+ClassRegistry = {
+	names = {},
+	classes = {}
+}
+setmetatable(ClassRegistry, {
+	__call = function(registry, class, name)
+		if name == nil then
+			for key, value in pairs(_G) do
+				if value == class then
+					name = key
+					break
+				end
+			end
+		end
+		if name then
+			registry.names[name] = class
+			registry.classes[class] = name
+		else
+			Error:throw("In ClassRegistry, no name found for class (not in global table?)")
+		end
+	end
+})
+
+function ClassRegistry:get(name)
+	return self.names[name]
+end
+
+function ClassRegistry:className(class)
+	if class == nil then return nil end
+	return self.classes[class]
+end
+
 Class = (function()
 	-- Object functions
 	local function implements(class, ...)
 		if class._interfaces == nil then class._interfaces = {} end
 		
 		for _, interface in ipairs(arg) do
-			table.insert(class._interfaces, inferface)
+			table.insert(class._interfaces, interface)
 			for k, v in pairs(interface) do
 				if (class[k] == nil) then
 					class[k] = v
@@ -283,8 +317,8 @@ Class = (function()
 	local function new(class, o)
 		o = o or {}
 		setmetatable(o, class)
+		o._class = class
 		o._base = class
-		--o._base = class._base
 		o._interfaces = class._interfaces
 		o.copy = objectCopy
 		return o
@@ -296,15 +330,21 @@ Class = (function()
 		return o
 	end
 	
+	local function register(class, name)
+		ClassRegistery[name] = class
+		return class
+	end
+	
 	function Class(base, initialization)
 		local class = {}
 		
-		--class._class = class
+		class._class = class
 		class._base = base
 		class.new = new
 		class.is_a = is_a
-		class.does_a = does_a
+		class.like_a = like_a
 		class.implements = implements
+		class.register = register
 		
 		-- init should be overwritten for constructor arguments
 		-- add a trivial one so base objects don't crash
@@ -343,6 +383,7 @@ Interface = (function()
 	
 	return Interface
 end)()
+
 -- End Class System
 
 -- Errors
@@ -363,7 +404,12 @@ end
 
 -- Interface mechanism
 function abstractFunction(self)
-	Error:throw("Abstract method called in "..tostring(self))
+	local msg = "Abstract method called in "..tostring(self)
+	local name = ClassRegistry:className(self)
+	if name then
+		msg = msg .. ".\nClass name: "..name
+	end
+	Error:throw(msg)
 end
 
 function optionalFunction(self)
@@ -417,6 +463,174 @@ end
 
 ---========================================---
 --- UTILITY END
+---========================================---
+
+---========================================---
+--- PERSISTENCE
+---
+--- Save/loading data from files
+---========================================---
+
+-- Interface Persistence
+Persistence = Interface(nil, {
+	save = abstractFunction, -- (object)
+	load = abstractFunction, -- ()
+})
+-- End Persistence
+
+-- Interface Persistent
+Persistent = Interface(nil, {
+	write = abstractFunction, -- (persistence)
+	read = abstractFunction, -- (persistence)
+})
+-- End Persistent
+
+-- Abstract Class BasicPersistence
+BasicPersistence = Class(nil, {
+	file = nil,
+	-- Private helper functions
+	actualSave = abstractFunction, -- (object)
+	actualLoad = abstractFunction, -- ()
+})
+
+function BasicPersistence:init(filename)
+	self.filename = filename
+end
+
+function BasicPersistence:open(filename)
+	return self(filename)
+end
+
+function BasicPersistence:save(object)
+	self.file = io.open(self.filename, "w")
+	self:actualSave(object)
+	self.file:close()
+	self.file = nil
+end
+
+function BasicPersistence:load()
+	self.file = io.open(self.filename, "r")
+	local object = self:actualLoad()
+	self.file:close()
+	self.file = nil
+	return object
+end
+-- End BasicPersistence
+
+-- Class PoloPersistence
+-- Save and load "plain old lua objects"
+POLOPersistence = Class(BasicPersistence)
+
+function POLOPersistence:actualSave(object)
+	local polo = self:toPOLO(object)
+	local saveString = pickle(polo)
+	self.file:write(saveString.."\n")
+end
+
+function POLOPersistence:actualLoad()
+	local saveString = self.file:read("*all")
+	local polo = unpickle(saveString)
+	local object = self:fromPOLO(polo)
+	return object
+end
+
+function POLOPersistence:toPOLO(object)
+	if type(object) ~= "table" then
+		if type(object) == "function" then
+			return nil
+		end
+		return object
+	end
+	
+	local polo
+	local class = object._class
+	local className = ClassRegistry:className(class)
+	if className ~= nil then
+		if class:like_a(Persistent) then
+			local handle = POLOPersistence(filename)
+			handle.activeClass = class
+			handle.polo = {}
+			object:write(handle)
+			if #handle.polo == 1 then
+				polo = handle.polo[1]
+			else
+				polo = handle.polo
+				polo._inArray = true
+			end
+			
+			polo._poloClass = className
+			return polo
+		else
+			polo = {}
+			polo._poloClass = className
+		end
+	else
+		polo = {}
+	end
+	
+	for key, value in pairs(object) do
+		local ktype = type(key)
+		if (ktype == "string" or ktype == "number")
+				and not string.match(key, '^_') then
+			polo[key] = self:toPOLO(value)
+		end
+	end
+	return polo
+end
+
+function POLOPersistence:fromPOLO(polo)
+	local object
+	if type(polo) ~= "table" then
+		return polo
+	end
+	
+	if polo._poloClass ~= nil then
+		local className = polo._poloClass
+		local class = ClassRegistry:get(className)
+		if type(class.readObject) == "function" then
+			local handle = POLOPersistence(filename)
+			handle.activeClass = class
+			handle.polo = polo
+			handle.poloIndex = 0
+			handle.inArray = polo._inArray
+			return class:readObject(handle)
+		end
+		object = class:new()
+	else
+		object = {}
+	end
+	
+	for key, value in pairs(polo) do
+		if key ~= _poloClass then
+			object[key] = self:fromPOLO(value)
+		end
+	end
+	return object
+end
+
+-- write, read, and done are for persistent objects
+-- to pass their data into POLOPersistence
+function POLOPersistence:write(object)
+	table.insert(self.polo, self:toPOLO(object))
+end
+
+function POLOPersistence:read()
+	if self.inArray then
+		self.poloIndex = self.poloIndex+1
+		return self.polo[self.poloIndex]
+	else
+		return self.polo
+	end
+end
+
+function POLOPersistence:done()
+	return self.poloIndex == #self.polo
+end
+
+-- End PoloPersistence
+
+---========================================---
+--- PERSISTENCE END
 ---========================================---
 
 ---========================================---
@@ -662,6 +876,7 @@ IORegistry = Class(nil, {
 	inputClasses = {},
 	outputClasses = {}
 })
+ClassRegistry(IORegistry)
 
 function IORegistry.registerPrivate(loc, name, ioClass)
 	loc[name] = ioClass
@@ -706,6 +921,7 @@ IOConfig = Class(nil, {
 	size = 0,
 	partSize = {}
 })
+ClassRegistry(IOConfig)
 -- Data format is list of:
 --         { name = ?, id = ?, param = ? }
 --		OR { name = ?, range = {?, ?}, param = ? }
@@ -825,6 +1041,7 @@ IOMap = Class(nil, {
 	ioSizes = {},
 	size = 0
 })
+ClassRegistry(IOMap)
 
 function IOMap:init(set)
 	self.set = {}
@@ -890,6 +1107,7 @@ Input = Interface(nil, {
 
 -- Class InputMap
 InputMap = Class(IOMap):implements(Input)
+ClassRegistry(InputMap)
 
 function InputMap:prepare()
 	for _, input in ipairs(self.set) do
@@ -911,6 +1129,7 @@ TiledInput = Class(nil, {
 	sensed = {},
 	size = InputSize,
 }):implements(Input)
+ClassRegistry(TiledInput)
 
 function TiledInput:prepare()
 	currentGame:readValues()
@@ -965,6 +1184,7 @@ IORegistry:registerInput("TiledInput", TiledInput)
 BiasInput = Class(nil, {
 	size = 1,
 }):implements(Input)
+ClassRegistry(BiasInput)
 
 function BiasInput:prepare()
 
@@ -983,6 +1203,7 @@ VelocityInput = Class(nil, {
 	yFactor = 1/60,
 	size = 2,
 }):implements(Input)
+ClassRegistry(VelocityInput)
 
 function VelocityInput:prepare()
 	currentGame:readValues()
@@ -1026,6 +1247,7 @@ Output = Interface(nil, {
 
 -- Class OutputMap
 OutputMap = Class(IOMap):implements(Output)
+ClassRegistry(OutputMap)
 
 function OutputMap:prepare()
 	for _, output in ipairs(self.set) do
@@ -1051,6 +1273,7 @@ ButtonOutput = Class(nil, {
 	size = #ButtonNames,
 	buffer = {}
 }):implements(Output)
+ClassRegistry(ButtonOutput)
 
 function ButtonOutput:prepare()
 	for k, v in pairs(self.buffer) do
@@ -1138,6 +1361,7 @@ Neuron = Class(nil, {
 	NEURON_HIDDEN = 1,
 	NEURON_OUTPUT = 2,
 })
+ClassRegistry(Neuron)
 
 function Neuron:init(class, index, param)
 	self.incoming = {}
@@ -1186,6 +1410,7 @@ NeuralNetwork = Class(nil, {
 	hiddenNeurons = {},
 	maxId = 0,
 })
+ClassRegistry(NeuralNetwork)
 
 function NeuralNetwork:init()
 	self.inputNeurons = {}
@@ -1237,9 +1462,9 @@ end
 -- Automatically use right Neuron class (input/output/hidden)
 NeuralNetwork.addNeuron = (function()
 	local addMap = {}
-	addMap[NEURON_INPUT] = "addInput"
-	addMap[NEURON_HIDDEN] = "addHidden"
-	addMap[NEURON_OUTPUT] = "addOutput"
+	addMap[Neuron.NEURON_INPUT] = "addInput"
+	addMap[Neuron.NEURON_HIDDEN] = "addHidden"
+	addMap[Neuron.NEURON_OUTPUT] = "addOutput"
 	return function(self, neuron)
 		return self[addMap[neuron.class]](self, neuron)
 	end
@@ -1281,6 +1506,7 @@ SimpleNNExecutor = Class(nil, {
 	source = {},
 	sink = {},
 }):implements(NNExecutor)
+ClassRegistry(SimpleNNExecutor)
 
 function SimpleNNExecutor:init(nn, source, sink)
 	values = {}
@@ -1358,7 +1584,8 @@ Genome = Class(nil, {
 	id = 0,
 	history = {},
 	savedKeys = {"genes", "fitness", "id", "history"},
-})
+}):implements(Persistent)
+ClassRegistry(Genome)
 
 Genome.newId = makeUniqueIdGenerator()
 
@@ -1385,22 +1612,22 @@ function Genome:copy(other)
 	return o
 end
 
-function Genome:serialize()
+function Genome:write(persistence)
 	-- Don't save the computed configuration
 	local savedVariables = {}
 	for _, key in ipairs(self.savedKeys) do
 		savedVariables[key] = self[key]
 	end
-	
-	return pickle(savedVariables)
+	persistence:write(savedVariables)
 end
 
-function Genome:deserialize(text)
-	local o = unpickle(text)
-	setmetatable(o, self)
-	self.__index = self
-	
-	return o
+function Genome:read(persistence)
+	local savedVariables = persistence:read(savedVariables)
+	local savedGenome = self:new()
+	for _, key in ipairs(self.savedKeys) do
+		savedGenome[key] = savedVariables[key]
+	end
+	return savedGenome
 end
 
 function Genome:difference(other)
@@ -1450,8 +1677,9 @@ end
 
 -- Class NNGenome
 NNGenome = Class(Genome, {
-	savedKeys = {"genes", "fitness", "id", "history", "innovation"}
+	savedKeys = {"genes", "fitness", "id", "history", "innovation", "inputSpec", "outputSpec", "mutationRates", "maxneuron"}
 })
+ClassRegistry(NNGenome)
 
 function NNGenome:init()
 	--self.inputSpec = IOConfig({ {name = "TiledInput", range = 170} })
@@ -1689,6 +1917,7 @@ SimpleMutation = Class(nil, {
 	param = {},
 	mutator = function(param, genome) return genome end,
 }):implements(Mutation)
+ClassRegistry(SimpleMutation)
 
 -- mutator is function (param, genome)
 function SimpleMutation:init(mutator)
@@ -1715,6 +1944,7 @@ end
 
 -- Abstract class MutationWithRate
 MutationWithRate = Class(SimpleMutation)
+ClassRegistry(MutationWithRate)
 MutationWithRate:addParam({ rate = 1.0 }) -- Default rate
 --MutationWithRate = SimpleMutation:new():init({ rate = 1.0 })
 
@@ -1742,6 +1972,7 @@ Breeder = Class(nil, {
 	param = {},
 	mutations = {}
 }):implements(IBreeder)
+ClassRegistry(Breeder)
 
 function Breeder:init()
 	self.param = shallowCopy(self._base.param)
@@ -1829,6 +2060,7 @@ end
 NNBreeder = Class(Breeder, {
 	mutations = {}
 })
+ClassRegistry(NNBreeder)
 
 function pointMutation(param, genome)
 	local step = param.step
@@ -2043,8 +2275,10 @@ BasicOrganism = Class(nil, {
 	phenotype = {},
 	breeder = nil,
 	executor = nil,
-	fitness = 0
-}):implements(Organism)
+	fitness = 0,
+	savedKeys = {"genome", "fitness", "name"}
+}):implements(Organism, Persistent)
+ClassRegistry(BasicOrganism)
 
 function BasicOrganism:init(genome)
 	self.genome = genome
@@ -2057,6 +2291,24 @@ function BasicOrganism:makeDefault()
 	local default = self(self.defaultGenome:copy())
 	default:mutate()
 	return default
+end
+
+function BasicOrganism:write(persistence)
+	-- Don't save the computed configuration
+	local savedVariables = {}
+	for _, key in ipairs(self.savedKeys) do
+		savedVariables[key] = self[key]
+	end
+	persistence:write(savedVariables)
+end
+
+function BasicOrganism:read(persistence)
+	local savedVariables = persistence:read(savedVariables)
+	local savedObject = self:new()
+	for _, key in ipairs(self.savedKeys) do
+		savedObject[key] = savedVariables[key]
+	end
+	return savedObject
 end
 
 function BasicOrganism:birth(ioRegistry)
@@ -2095,12 +2347,100 @@ end
 function BasicOrganism:getGenome()
 	return self.genome
 end
+--[[
+function BasicOrganism:toPOLO()
+	local genome = self.genome
+	
+	local genomePolo = {
+		maxneuron = genome.maxneuron,
+		mutationRates = {},
+		genes = {},
+	}
+	
+	for mutation,rate in pairs(genome.mutationRates) do
+		table.insert(genomePolo.mutationRates, {
+			mutation = mutation,
+			rate = rate
+		})
+	end
+
+	for _, gene in pairs(genome.genes) do
+		table.insert(genomePolo.genes, {
+			into = gene.into,
+			out = gene.out,
+			weight = gene.weight,
+			innovation = gene.innovation,
+			enabled = gene.enabled
+		})
+	end
+	
+	local polo = {
+		name = self.name,
+		fitness = self.fitness,
+		genome = genomePolo
+	}
+	return polo
+end]]
+--[[
+function BasicOrganism:save(organism, file)
+	local genome = organism.genome
+	file:write(organism.name .. "\n")
+	file:write(organism.fitness .. "\n")
+	file:write(genome.maxneuron .. "\n")
+	for mutation,rate in pairs(genome.mutationRates) do
+		file:write(mutation .. "\n")
+		file:write(rate .. "\n")
+	end
+	file:write("done\n")
+   
+	file:write(#genome.genes .. "\n")
+	for l,gene in pairs(genome.genes) do
+		file:write(gene.into .. " ")
+		file:write(gene.out .. " ")
+		file:write(gene.weight .. " ")
+		file:write(gene.innovation .. " ")
+		if(gene.enabled) then
+				file:write("1\n")
+		else
+				file:write("0\n")
+		end
+	end
+end]]
+--[[
+function BasicOrganism:load(file)
+	local organism = NNOrganism:makeDefault()
+	local genome = organism.genome
+	
+	organism.name = file:read("*number")
+	organism.fitness = file:read("*number")
+	genome.maxneuron = file:read("*number")
+	local line = file:read("*line")
+	while line ~= "done" do
+		genome.mutationRates[line] = file:read("*number")
+		line = file:read("*line")
+	end
+	local numGenes = file:read("*number")
+	for n=1,numGenes do
+		local gene = NNGenome:makeGene()
+		table.insert(genome.genes, gene)
+		local enabled
+		gene.into, gene.out, gene.weight, gene.innovation, enabled = file:read("*number", "*number", "*number", "*number", "*number")
+		if enabled == 0 then
+			gene.enabled = false
+		else
+			gene.enabled = true
+		end
+	end
+	return organism
+end--]]
+
 -- End BasicOrganism
 
 -- Class NNOrganism
 NNOrganism = Class(BasicOrganism, {
 	
 })
+ClassRegistry(NNOrganism)
 -- End NNOrganism
 
 NNOrganism.defaultGenome = (function()
@@ -2184,7 +2524,6 @@ function NNOrganism:makePhenotype(source, sink)
 	end
 	
 	self.network = network
---DEBUG(network)
 	return network
 end
 
@@ -2206,10 +2545,12 @@ end
 --- Data for groups of similar organisms
 ---========================================---
 
+-- Class Species
 Species = Class(nil, {
 	organisms = {},
 	name = "?"
 })
+ClassRegistry(Species)
 
 function Species:init(name)
 	self.name = name
@@ -2240,6 +2581,29 @@ function Species:organismIter()
 		return self.organisms[i], i
 	end
 end
+--[[
+function Species:load(file)
+	local species = Species(i)
+	species.name = file:read("*number")
+	species.topFitness = file:read("*number")
+	species.staleness = file:read("*number")
+	local numGenomes = file:read("*number")
+	for g=1,numGenomes do
+		species:addOrganism(BasicOrganism:load(file))
+	end
+	return species
+end
+
+function Species:save(species, file)
+	file:write(species.name .. "\n")
+	file:write(species.topFitness .. "\n")
+	file:write(species.staleness .. "\n")
+	file:write(#species.organisms .. "\n")
+	for m,organism in pairs(species.organisms) do
+		BasicOrganism:save(organism, file)
+	end
+end]]
+-- End Species
 
 ---========================================---
 --- SPECIES END
@@ -2259,6 +2623,7 @@ Population = Class(nil, {
 	organisms = {},
 	maxFitness,
 })
+ClassRegistry(Population)
 
 function Population:init(maxSize)	
 	self.species = {}
@@ -2356,14 +2721,7 @@ function Population:breedChild(species)
 	local child = {}
 	local organism = species.organisms[math.random(1, #species.organisms)]
 	
-	--if organism == nil then
-	--	organism = NNOrganism(original)
-	--end
 	return organism:breed(species.organisms)
-	
-	--local breeder = NNBreeder():addParam({crossoverChance = CrossoverChance})
-	
-	--return breeder:breed(original, species.genomes)
 end
 
 function Population:removeStaleSpecies()
@@ -2440,39 +2798,8 @@ function Population:newGeneration()
 end
 
 function Population:writeFile(filename)
-	local file = io.open(filename, "w")
-	file:write(self.generation .. "\n")
-	file:write(self.maxFitness .. "\n")
-	file:write(#self.species .. "\n")
-	for n,species in pairs(self.species) do
-		file:write(species.topFitness .. "\n")
-		file:write(species.staleness .. "\n")
-		file:write(#species.organisms .. "\n")
-		for m,organism in pairs(species.organisms) do
-			local genome = organism.genome
-			file:write(genome.fitness .. "\n")
-			file:write(genome.maxneuron .. "\n")
-			for mutation,rate in pairs(genome.mutationRates) do
-				file:write(mutation .. "\n")
-				file:write(rate .. "\n")
-			end
-			file:write("done\n")
-		   
-			file:write(#genome.genes .. "\n")
-			for l,gene in pairs(genome.genes) do
-				file:write(gene.into .. " ")
-				file:write(gene.out .. " ")
-				file:write(gene.weight .. " ")
-				file:write(gene.innovation .. " ")
-				if(gene.enabled) then
-						file:write("1\n")
-				else
-						file:write("0\n")
-				end
-			end
-		end
-	end
-	file:close()
+	local persistence = POLOPersistence(filename)
+	self = persistence:save(self)
 end
  
 function Population:savePool()
@@ -2481,49 +2808,10 @@ function Population:savePool()
 end
 
 function Population:loadFile(filename)
-	local file = io.open(filename, "r")
-	self = Population(PopulationMax)
-	self.generation = file:read("*number")
-	self.maxFitness = file:read("*number")
-	ConfigUI:setMaxFitness(self.maxFitness)
-	local numSpecies = file:read("*number")
-	for s=1,numSpecies do
-		local species = Species(i)
-
-		table.insert(self.species, species)
-		species.topFitness = file:read("*number")
-		species.staleness = file:read("*number")
-		local numGenomes = file:read("*number")
-		for g=1,numGenomes do
-			local genome = NNGenome()
-			local organism = NNOrganism(genome)
-			
-			species:addOrganism(organism)
-			genome.fitness = file:read("*number")
-			genome.maxneuron = file:read("*number")
-			local line = file:read("*line")
-			while line ~= "done" do
-				genome.mutationRates[line] = file:read("*number")
-				line = file:read("*line")
-			end
-			local numGenes = file:read("*number")
-			for n=1,numGenes do
-				local gene = NNGenome:makeGene()
-				table.insert(genome.genes, gene)
-				local enabled
-				gene.into, gene.out, gene.weight, gene.innovation, enabled = file:read("*number", "*number", "*number", "*number", "*number")
-				if enabled == 0 then
-					gene.enabled = false
-				else
-					gene.enabled = true
-				end
-			   
-			end
-		end
-	end
-	file:close()
-   
-	popSim:init(self, nil)
+	local persistence = POLOPersistence(filename)
+	newPop = persistence:load()
+	
+	popSim:init(newPop, nil)
 	while popSim:fitnessAlreadyMeasured() do
 			popSim:nextGenome()
 	end
@@ -2584,6 +2872,7 @@ BasicJudge = Class(nil, {
 	organism = nil,
 	frame = nil
 }):implements(Judge)
+ClassRegistry(BasicJudge)
 
 function BasicJudge:setOrganism(organism)
 	self.organism = organism
@@ -2604,6 +2893,7 @@ end
 
 -- Rightmost Judge
 RightmostJudge = Class(BasicJudge)
+ClassRegistry(RightmostJudge)
 
 function RightmostJudge:setup()
 	self._base.setup(self)
@@ -2679,6 +2969,7 @@ BasicSimulation = Class(nil, {
 	
 	evaluate = abstractFunction,
 }):implements(Simulation)
+ClassRegistry(BasicSimulation)
 
 function BasicSimulation:init()
 	self.done = false
@@ -2704,6 +2995,7 @@ end
 
 -- Class GenomeSimulation
 GenomeSimulation = Class(BasicSimulation)
+ClassRegistry(GenomeSimulation)
 
 function GenomeSimulation:init(organism, evaluator)
 	self:_baseInit()
@@ -2778,6 +3070,7 @@ end
 
 -- PopulationSimulation
 PopulationSimulation = Class(BasicSimulation)
+ClassRegistry(PopulationSimulation)
 
 function PopulationSimulation:init(population, genomeSimFactory)
 	self:_baseInit()
@@ -2826,7 +3119,6 @@ function PopulationSimulation:evaluate()
 		--initializeRun()
 	end
 end
-
 
 function PopulationSimulation:reset()
 	self.speciesIter = self.population:speciesIter()
@@ -3430,7 +3722,8 @@ end
 
 -- Class ConfigUI
 ConfigUI = Class(nil,{
-	form = nil
+	form = nil,
+	defaultFile = Filename .. ".pool"
 })
 
 function ConfigUI:show()
@@ -3452,7 +3745,7 @@ function ConfigUI:show()
 			popSim.population:loadPool()
 		end, 80, 102)
 	
-	self.saveLoadFileBox = forms.textbox(form, Filename .. ".pool", 170, 25, nil, 5, 148)
+	self.saveLoadFileBox = forms.textbox(form, self.defaultFile, 170, 25, nil, 5, 148)
 	self.saveLoadLabel = forms.label(form, "Save/Load:", 5, 129)
 	self.playTopButton = forms.button(form, "Play Top", function()
 			popSim:playTop()
@@ -3484,10 +3777,12 @@ end
 function ConfigUI:getSaveLoadFile()
 	local form = self.form
 	if form ~= nil then
-		return forms.gettext(self.saveLoadFileBox)
-	else
-		return "DP1.state.pool"
+		local filename = forms.gettext(self.saveLoadFileBox)
+		if filename ~= nil and filename ~= "" then
+			return filename
+		end
 	end
+	return self.defaultFile
 end
 
 function ConfigUI:setMaxFitness(fitness)
@@ -3500,7 +3795,7 @@ end
 --- UI END
 ---========================================---
 
-PopulationMax = 200
+PopulationMax = 10
 DeltaDisjoint = 2.0
 DeltaWeights = 0.4
 DeltaThreshold = 1.0

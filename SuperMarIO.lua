@@ -94,6 +94,182 @@ function unpickle(s)
   return tables[1]
 end
 
+
+----------------------------------------------
+-- TabluePersistence.lua
+----------------------------------------------
+
+do
+	local write, writeIndent, writers, refCount;
+
+	persistence =
+	{
+		store = function (path, ...)
+			local file, e = io.open(path, "w");
+			if not file then
+				return error(e);
+			end
+			local n = select("#", ...);
+			-- Count references
+			local objRefCount = {}; -- Stores reference that will be exported
+			for i = 1, n do
+				refCount(objRefCount, (select(i,...)));
+			end;
+			-- Export Objects with more than one ref and assign name
+			-- First, create empty tables for each
+			local objRefNames = {};
+			local objRefIdx = 0;
+			file:write("-- Persistent Data\n");
+			file:write("local multiRefObjects = {\n");
+			for obj, count in pairs(objRefCount) do
+				if count > 1 then
+					objRefIdx = objRefIdx + 1;
+					objRefNames[obj] = objRefIdx;
+					file:write("{};"); -- table objRefIdx
+				end;
+			end;
+			file:write("\n} -- multiRefObjects\n");
+			-- Then fill them (this requires all empty multiRefObjects to exist)
+			for obj, idx in pairs(objRefNames) do
+				for k, v in pairs(obj) do
+					file:write("multiRefObjects["..idx.."][");
+					write(file, k, 0, objRefNames);
+					file:write("] = ");
+					write(file, v, 0, objRefNames);
+					file:write(";\n");
+				end;
+			end;
+			-- Create the remaining objects
+			for i = 1, n do
+				file:write("local ".."obj"..i.." = ");
+				write(file, (select(i,...)), 0, objRefNames);
+				file:write("\n");
+			end
+			-- Return them
+			if n > 0 then
+				file:write("return obj1");
+				for i = 2, n do
+					file:write(" ,obj"..i);
+				end;
+				file:write("\n");
+			else
+				file:write("return\n");
+			end;
+			if type(path) == "string" then
+				file:close();
+			end;
+		end;
+
+		load = function (path)
+			if type(path) == "string" then
+				local f, e = loadfile(path);
+			else
+				local f, e = path:read('*a')
+			end
+			if f then
+				return f();
+			else
+				return nil, e;
+			end;
+		end;
+	}
+
+	-- Private methods
+
+	-- write thing (dispatcher)
+	write = function (file, item, level, objRefNames)
+		writers[type(item)](file, item, level, objRefNames);
+	end;
+
+	-- write indent
+	writeIndent = function (file, level)
+		for i = 1, level do
+			file:write("\t");
+		end;
+	end;
+
+	-- recursively count references
+	refCount = function (objRefCount, item)
+		-- only count reference types (tables)
+		if type(item) == "table" then
+			-- Increase ref count
+			if objRefCount[item] then
+				objRefCount[item] = objRefCount[item] + 1;
+			else
+				objRefCount[item] = 1;
+				-- If first encounter, traverse
+				for k, v in pairs(item) do
+					refCount(objRefCount, k);
+					refCount(objRefCount, v);
+				end;
+			end;
+		end;
+	end;
+
+	-- Format items for the purpose of restoring
+	writers = {
+		["nil"] = function (file, item)
+				file:write("nil");
+			end;
+		["number"] = function (file, item)
+				file:write(tostring(item));
+			end;
+		["string"] = function (file, item)
+				file:write(string.format("%q", item));
+			end;
+		["boolean"] = function (file, item)
+				if item then
+					file:write("true");
+				else
+					file:write("false");
+				end
+			end;
+		["table"] = function (file, item, level, objRefNames)
+				local refIdx = objRefNames[item];
+				if refIdx then
+					-- Table with multiple references
+					file:write("multiRefObjects["..refIdx.."]");
+				else
+					-- Single use table
+					file:write("{\n");
+					for k, v in pairs(item) do
+						writeIndent(file, level+1);
+						file:write("[");
+						write(file, k, level+1, objRefNames);
+						file:write("] = ");
+						write(file, v, level+1, objRefNames);
+						file:write(";\n");
+					end
+					writeIndent(file, level);
+					file:write("}");
+				end;
+			end;
+		["function"] = function (file, item)
+				-- Does only work for "normal" functions, not those
+				-- with upvalues or c functions
+				local dInfo = debug.getinfo(item, "uS");
+				if dInfo.nups > 0 then
+					file:write("nil --[[functions with upvalue not supported]]");
+				elseif dInfo.what ~= "Lua" then
+					file:write("nil --[[non-lua function not supported]]");
+				else
+					local r, s = pcall(string.dump,item);
+					if r then
+						file:write(string.format("loadstring(%q)", s));
+					else
+						file:write("nil --[[function could not be dumped]]");
+					end
+				end
+			end;
+		["thread"] = function (file, item)
+				file:write("nil --[[thread]]\n");
+			end;
+		["userdata"] = function (file, item)
+				file:write("nil --[[userdata]]\n");
+			end;
+	}
+end
+
 ---========================================---
 --- LIBRARY END
 ---========================================---
@@ -112,6 +288,20 @@ function mergeInto(dest, source)
 	end
 	for k, v in pairs(source) do
 		if type(v) == "table" then 
+			dest[k] = v
+		else
+			dest[k] = v
+		end
+	end
+	return dest
+end
+
+function mergeIntoWithCopy(dest, source)
+	if type(source) ~= "table" then
+		return dest
+	end
+	for k, v in pairs(source) do
+		if type(v) == "table" then 
 			if type(v.copy) == "function" then
 				dest[k] = v:copy()
 			else
@@ -124,7 +314,6 @@ function mergeInto(dest, source)
 	end
 	return dest
 end
-
 
 function deepMergeInto(dest, source)
 	for k, v in pairs(source) do
@@ -416,22 +605,6 @@ function optionalFunction(self)
 
 end
 
-function implements(class, interface)
-	for k, v in pairs(interface) do
-		if (class[k] == nil) then
-			class[k] = v
-		else
-			--DEBUG("Not overwriting "..k)
-		end
-	end
-end
-
-function implementsAll(class, ...)
-	for v in values(arg) do
-		implements(class, v)
-	end
-end
-
 -- Events
 Event = Class(nil)
 
@@ -521,18 +694,32 @@ end
 -- Save and load "plain old lua objects"
 POLOPersistence = Class(BasicPersistence)
 
+function POLOPersistence:save(object)
+	--DEBUG("Saving...")
+	--local polo = self:toPOLO(object)
+	--persistence.store(self.filename, polo)
+end
+
+function POLOPersistence:load()
+	--return persistence.load(self.filename)
+end
+
+--[[
 function POLOPersistence:actualSave(object)
 	local polo = self:toPOLO(object)
-	local saveString = pickle(polo)
-	self.file:write(saveString.."\n")
+	DEBUG("PICKLE")
+	--local saveString = pickle(polo)
+	--self.file:write(saveString.."\n")
+	persistence.store(self.file, polo)
 end
 
 function POLOPersistence:actualLoad()
-	local saveString = self.file:read("*all")
-	local polo = unpickle(saveString)
-	local object = self:fromPOLO(polo)
-	return object
-end
+	--local saveString = self.file:read("*all")
+	--local polo = unpickle(saveString)
+	--local object = self:fromPOLO(polo)
+	--return object
+	return persistence.load(self.file)
+end]]
 
 function POLOPersistence:toPOLO(object)
 	if type(object) ~= "table" then
@@ -892,14 +1079,23 @@ end
 
 function IORegistry.getPrivate(loc, map, spec)
 	local ioSet = {}
-
-	local names = spec:getNames()
-	if #names == 1 then
-		return loc[names[1]]
+	--local names = spec:getNames()
+	local data = spec.data
+	if #data <= 1 then
+		if #data == 1 then
+			data = data[1]
+		end
+		local param = data.param
+		ioObject = loc[data.name]()
+		if param then ioObject:setParam(param) end
+		return ioObject
 	end
 	
-	for _, name in ipairs(names) do
-		ioSet[name] = loc[name]
+	for _, datum in ipairs(data) do
+		local name = datum.name
+		local param = datum.param
+		ioSet[name] = loc[name]()
+		if param then ioSet[name]:setParam(param) end
 	end
 	
 	return map(ioSet)
@@ -923,9 +1119,9 @@ IOConfig = Class(nil, {
 })
 ClassRegistry(IOConfig)
 -- Data format is list of:
---         { name = ?, id = ?, param = ? }
---		OR { name = ?, range = {?, ?}, param = ? }
---		OR { name = ?, range = ?, param = ? }
+--         { name = ?, id = ?, [param = ?] }
+--		OR { name = ?, range = {?, ?}, [param = ?] }
+--		OR { name = ?, range = ?, [param = ?] }
 
 function IOConfig:init(data, names)
 	self.data = data
@@ -940,6 +1136,7 @@ function IOConfig:init(data, names)
 			local name = datum.name
 			if foundNames[name] == nil then
 				table.insert(self.names, name)
+				foundNames[name] = 1
 			end
 		end
 	end
@@ -990,40 +1187,50 @@ function IOConfig:iterator(ioObject)
 
 	--writeTableToConsole(self.data)
 	return function()
-		if dataIndex > #self.data then
-			return nil
-		end
-		
-		local data = self.data[dataIndex]
-		local name = data.name
+		local data
+		local name
 		local id, handle
+		local nextFound = false
 		
-		if range == nil then
-			if data.id ~= nil then
-				dataIndex = dataIndex + 1
-				id = data.id
-			elseif data.range ~= nil then
-				if type(data.range) == "table" then
-					range = data.range
-					rangeIndex = range[1]
-				else
-					range = {1, data.range}
-					rangeIndex = range[1]
-				end
-			else
-				--range = {1, ioObject.size}
-				Error:throw("Invalid IOConfig")
-				return nil
+		while not nextFound do
+			if dataIndex > #self.data then
+				return nil -- Done with iteration
 			end
-		end
-		
-		-- If range, still need to do it
-		if range ~= nil then
-			id = rangeIndex
-			rangeIndex = rangeIndex + 1
-			if rangeIndex > range[2] then
-				range = nil
-				dataIndex = dataIndex + 1
+			data = self.data[dataIndex]
+			name = data.name
+			
+			if range ~= nil then
+				if rangeIndex > range[2] then
+					range = nil
+					dataIndex = dataIndex + 1
+				else
+					-- rangeIndex is next id
+					id = rangeIndex
+					nextFound = true
+				end
+				rangeIndex = rangeIndex + 1
+			else
+				if data.id ~= nil then
+					-- Set id then increment
+					id = data.id
+					dataIndex = dataIndex + 1
+					nextFound = true
+				elseif data.range ~= nil then
+					-- Initial range then
+					-- return on next pass of loop
+					-- (Avoid 0 length range issues)
+					if type(data.range) == "table" then
+						range = data.range
+						rangeIndex = range[1]
+					else
+						range = {1, data.range}
+						rangeIndex = range[1]
+					end
+				else
+					--range = {1, ioObject.size}
+					Error:throw("Invalid IOConfig")
+					return nil
+				end
 			end
 		end
 		handle = ioObject:getHandle(name, id)
@@ -1093,7 +1300,9 @@ end
 
 -- Interface Input
 Input = Interface(nil, {
+	param = nil,
 	size = 0, -- Number of inputs
+	setParam = optionalFunction, -- ()
 	prepare = abstractFunction, -- ()
 	get = abstractFunction, -- (input id, [parameter])
 	getHandle = function(self, name, index)
@@ -1108,6 +1317,10 @@ Input = Interface(nil, {
 -- Class InputMap
 InputMap = Class(IOMap):implements(Input)
 ClassRegistry(InputMap)
+
+function InputMap:setParam(param)
+	self.param = param
+end
 
 function InputMap:prepare()
 	for _, input in ipairs(self.set) do
@@ -1169,8 +1382,6 @@ function TiledInput:prepare()
 			id = id + 1
 		end
 	end
-	
-	inputs[id] = 1
 end
 
 function TiledInput:get(id)
@@ -1220,6 +1431,62 @@ end
 IORegistry:registerInput("VelocityInput", VelocityInput)
 -- End VelocityInput
 
+-- XYInput
+XYInput = Class(nil, {
+	coordinates = {},
+	sensed = {},
+	size = 0,
+}):implements(Input)
+ClassRegistry(XYInput)
+
+function XYInput:setParam(param)
+	self.coordinates = param
+	self.size = #param
+end
+
+function XYInput:prepare()
+	currentGame:readValues()
+   
+	local sprites = currentGame:getSprites()
+	local extended = currentGame:getExtendedSprites()
+
+	local inputs = self.sensed
+	
+	for index, coord in ipairs(self.coordinates) do
+		local x = coord[1]
+		local y = coord[2]
+		inputs[index] = 0
+		
+		local tile = currentGame:getTile(x, y)
+		if tile == 1 and marioY+y < 0x1B0 then
+				inputs[index] = 1
+		end
+		
+		for i = 1,#sprites do
+			distx = math.abs(sprites[i]["x"] - (marioX+x))
+			disty = math.abs(sprites[i]["y"] - (marioY+y))
+			if distx <= 8 and disty <= 8 then
+					inputs[index] = -1
+			end
+		end
+
+		for i = 1,#extended do
+			distx = math.abs(extended[i]["x"] - (marioX+x))
+			disty = math.abs(extended[i]["y"] - (marioY+y))
+			if distx < 8 and disty < 8 then
+					inputs[index] = -1
+			end
+		end
+	end
+end
+
+function XYInput:get(id)
+	return self.sensed[id]
+end
+
+IORegistry:registerInput("XYInput", XYInput)
+-- End XYInput
+
 ---========================================---
 --- INPUT END
 ---========================================---
@@ -1233,6 +1500,7 @@ IORegistry:registerInput("VelocityInput", VelocityInput)
 -- Interface Output
 Output = Interface(nil, {
 	size = 0, -- List of output ids and classification
+	setParam = optionalFunction, -- ()
 	prepare = abstractFunction, -- ()
 	set = abstractFunction, -- (output id, value, [parameter])
 	send = abstractFunction, -- ()
@@ -1345,10 +1613,6 @@ Filter = Interface(Runnable, {
 
 -- Class Neuron
 -- Neurons in network
---NEURON_INPUT = 0
---NEURON_HIDDEN = 1
---NEURON_OUTPUT = 2
-
 Neuron = Class(nil, {
 	id = 0,
 	class = 0,
@@ -1485,12 +1749,11 @@ end
 
 -- End Neural Network
 
--- Interface NNExecutor
+-- Interface Executor
 -- Network executor
-NNExecutor = Interface(Filter, {
+Executor = Interface(Filter, {
 	source = {},
 	sink = {},
-	neuralNetwork = {},
 })
 -- End Interface
 
@@ -1498,24 +1761,25 @@ function sigmoid(x)
         return 2/(1+math.exp(-4.9*x))-1
 end
 
--- Class SimpleNNExecutor
-SimpleNNExecutor = Class(nil, {
+-- Class NNExecutor
+NNExecutor = Class(nil, {
 	values = {}, -- Saved states of the NN Neurons
 	transfer = sigmoid,
 	
 	source = {},
 	sink = {},
-}):implements(NNExecutor)
-ClassRegistry(SimpleNNExecutor)
+	neuralNetwork = {},
+}):implements(Executor)
+ClassRegistry(NNExecutor)
 
-function SimpleNNExecutor:init(nn, source, sink)
+function NNExecutor:init(nn, source, sink)
 	values = {}
 	self.neuralNetwork = nn
 	self.source = source
 	self.sink = sink
 end
 
-function SimpleNNExecutor:copy(other)
+function NNExecutor:copy(other)
 	local o = self()
 	
 	shallowCopyValues(o, other, {"source", "sink", "neuralNetwork", "transfer"})
@@ -1523,18 +1787,18 @@ function SimpleNNExecutor:copy(other)
 	return o
 end
 
-function SimpleNNExecutor:setNeuronValuePrivate(neuron, value)
+function NNExecutor:setNeuronValuePrivate(neuron, value)
 	self.values[neuron.id] = value
 	neuron.value = value
 end
 
-function SimpleNNExecutor:reset()
+function NNExecutor:reset()
 	for _, neuron in ipairs(self.neuralNetwork.allNeurons) do
 		self:setNeuronValuePrivate(neuron, 0)
 	end
 end
 
-function SimpleNNExecutor:processNeuron(neuron)
+function NNExecutor:processNeuron(neuron)
 	local sum = 0
 	for _, link in ipairs(neuron.incoming) do
 		local sourceId = link.source
@@ -1546,7 +1810,7 @@ function SimpleNNExecutor:processNeuron(neuron)
 	end
 end
 
-function SimpleNNExecutor:run()
+function NNExecutor:run()
 	local network = self.neuralNetwork
 	
 	for _, neuron in ipairs(network.inputNeurons) do
@@ -1564,7 +1828,7 @@ function SimpleNNExecutor:run()
 	end
 	self.sink:send()
 end
--- End SimpleNNExecutor
+-- End NNExecutor
 
 ---========================================---
 --- NEURAL NETWORK END
@@ -1630,6 +1894,14 @@ function Genome:read(persistence)
 	return savedGenome
 end
 
+function Genome:getInputSpec()
+	return self.inputSpec
+end
+
+function Genome:getOutputSpec()
+	return self.outputSpec
+end
+
 function Genome:difference(other)
 	if self == other then
 		return 0.0
@@ -1682,13 +1954,12 @@ NNGenome = Class(Genome, {
 ClassRegistry(NNGenome)
 
 function NNGenome:init()
-	--self.inputSpec = IOConfig({ {name = "TiledInput", range = 170} })
-	--self.outputSpec = IOConfig({ {name = "ButtonOutput", range = 8} })
 	self.genes = {}
 	self.fitness = 0
 	self.adjustedFitness = 0
 	self.network = {}
 	self.maxneuron = 0
+	self.neuronCount = 0
 	self.globalRank = 0
 	self.mutationRates = {}
 	self.mutationRates["connections"] = MutateConnectionsChance
@@ -1717,8 +1988,13 @@ function NNGenome:makeGene()
 	gene.weight = 0.0
 	gene.enabled = true
 	gene.innovation = 0
-   
+
 	return gene
+end
+
+function NNGenome:newNeuron()
+	self.neuronCount = self.neuronCount+1
+	return self.neuronCount
 end
 
 -- The configuration is the network
@@ -1774,13 +2050,13 @@ function NNGenome:computeConfig(source, sink)
 end
 
 function NNGenome:makeBaseOrganism(config, source, sink)
-	return SimpleNNExecutor(config, source, sink)
+	return NNExecutor(config, source, sink)
 end
 
 function NNGenome:difference(other)
 	local dd = DeltaDisjoint*self:disjoint(self.genes, other.genes)
 	local dw = DeltaWeights*self:weights(self.genes, other.genes)
-	return dd+dw
+	return dd + dw
 end
 
 function NNGenome:neuronIdForGene(geneEndPoint)
@@ -1791,106 +2067,67 @@ function NNGenome:randomNeuron(nonInput)
 	local genes = self.genes
 	
 	local numInputs = self.inputSpec:getSize()
-	local numOutputs = self.outputSpec:getSize()
 	
-	local neurons = {}
-	if not nonInput then
-		for i=1,numInputs do
-			neurons[i] = true
-		end
-	end
-	for o=1,numOutputs  do
-		neurons[numInputs+o] = true
-	end
-	for i=1,#genes do
-		if (not nonInput) or genes[i].into > numInputs then
-			neurons[genes[i].into] = true
-		end
-		if (not nonInput) or genes[i].out > numInputs then
-			neurons[genes[i].out] = true
-		end
-	end
-
-	local count = 0
-	for _,_ in pairs(neurons) do
-		count = count + 1
-	end
+	local count = self.maxneuron
+	if nonInput then count = count - numInputs end
 	local n = math.random(1, count)
+	if nonInput then n = n + numInputs end
 	
-	for k,v in pairs(neurons) do
-		n = n-1
-		if n == 0 then
-			return k
-		end
-	end
-   
-	return nil
+	return n
 end
  
 function NNGenome:containsLink(link)
 	local genes = self.genes
-        for i=1,#genes do
-                local gene = genes[i]
-                if gene.into == link.into and gene.out == link.out then
-                        return true
-                end
-        end
+	for _, gene in ipairs(genes) do
+		if gene.into == link.into and gene.out == link.out then
+			return true
+		end
+	end
+	return false
 end
  
 function NNGenome:disjoint(genes1, genes2)
-	local i1 = {}
-	for i = 1,#genes1 do
-		local gene = genes1[i]
-		i1[gene.innovation] = true
+	local genePair = { genes1, genes2 }
+	local innovationPair = { {}, {} }
+	
+	for i = 1, 2 do
+		for _, gene in ipairs(genePair[i]) do
+			innovationPair[i][gene.innovation] = true
+		end
 	end
-
-	local i2 = {}
-	for i = 1,#genes2 do
-		local gene = genes2[i]
-		i2[gene.innovation] = true
-	end
-   
+	
 	local disjointGenes = 0
-	for i = 1,#genes1 do
-		local gene = genes1[i]
-		if not i2[gene.innovation] then
-				disjointGenes = disjointGenes+1
+	for i = 1, 2 do
+		local otherI = 3 - i
+		for _, gene in ipairs(genePair[i]) do
+			if not innovationPair[otherI][gene.innovation] then
+				disjointGenes = disjointGenes + 1
+			end
 		end
 	end
-   
-	for i = 1,#genes2 do
-		local gene = genes2[i]
-		if not i1[gene.innovation] then
-				disjointGenes = disjointGenes+1
-		end
-	end
-   
-	local n = math.max(#genes1, #genes2)
-   
-	return disjointGenes / n
+	
+	local maxGeneCount = math.max(#genes1, #genes2)
+	return disjointGenes/maxGeneCount
 end
  
 function NNGenome:weights(genes1, genes2)
-	local i2 = {}
-	for i = 1,#genes2 do
-		local gene = genes2[i]
-		i2[gene.innovation] = gene
+	local innovationMap2 = {}
+	for _, gene2 in ipairs(genes2) do
+		innovationMap2[gene2.innovation] = gene2
 	end
 
-	local sum = 0
+	local total = 0
 	local coincident = 0
-	for i = 1,#genes1 do
-		local gene = genes1[i]
-		if i2[gene.innovation] ~= nil then
-			local gene2 = i2[gene.innovation]
-			sum = sum + math.abs(gene.weight - gene2.weight)
+	for _, gene in ipairs(genes1) do
+		if innovationMap2[gene.innovation] ~= nil then
+			local gene2 = innovationMap2[gene.innovation]
+			total = total + math.abs(gene.weight - gene2.weight)
 			coincident = coincident + 1
 		end
 	end
    
-	return sum / coincident
+	return total / coincident
 end
-
 -- End NNGenome
 
 ---========================================---
@@ -1996,7 +2233,9 @@ function Breeder:addParam(param)
 			mutationId, key = string.match(k, "^(%w+):(.*)$")
 		--writeTableToConsole(self.mutations)
 			local mutation = self.mutations[mutationId]
-			mutation.param[key] = v
+			if mutation then
+				mutation.param[key] = v
+			end
 		else
 			self.param[k] = v
 		end
@@ -2079,8 +2318,8 @@ NNBreeder:addMutation("connections",
 	MutationWithRate(pointMutation))
 
 function linkMutation(param, genome)
-	local neuron1 = genome:randomNeuron(false) --randomNeuron(genome.genes, false)
-	local neuron2 = genome:randomNeuron(true)  --randomNeuron(genome.genes, true)
+	local neuron1 = genome:randomNeuron(false)
+	local neuron2 = genome:randomNeuron(true)  
 	
 	if not neuron1 or not neuron2 then return end
 	local newLink = NNGenome:makeGene()
@@ -2231,8 +2470,9 @@ function NNBreeder:mutate(genome)
 	end
 	
 	local param = {}
+	-- Add xy for XYInput
 	local mutationTypes = {"connections", "link", "bias",
-		"node", "enable", "disable"}
+		"node", "enable", "disable", "xy"}
 	for _, typeName in ipairs(mutationTypes) do
 		param[typeName..":rate"] = genome.mutationRates[typeName]
 	end
@@ -2245,6 +2485,52 @@ function NNBreeder:mutate(genome)
 	end
 end
 -- End NNBreeder
+
+-- Class NNXYBreeder
+NNXYBreeder = Class(NNBreeder)
+
+function xyMutation(param, genome)
+	if #genome.genes == 0 then
+			return
+	end
+
+	local usedXYInputs = {}
+	local usedXYHash = {}
+	local layout = genome.inputSpec:layoutInfo("XYInput")
+	for _, gene in ipairs(genome.genes) do
+		if gene.enabled then
+			local id = gene.into
+			if id >= layout.offset and id < layout.offset+layout.size then
+				if not usedXYHash[id] then
+					usedXYHash[id] = true
+					table.insert(usedXYInputs, id-layout.offset+1)
+				end
+			end
+		end
+	end
+	
+	if #usedXYInputs == 0 then return end
+	
+	genome.inputSpec.data = deepCopy(genome.inputSpec.data)
+	local pointIndex = usedXYInputs[math.random(1,#usedXYInputs)]
+	
+	local dx = math.random(-XYDistance, XYDistance)
+	local dy = math.random(-XYDistance, XYDistance)
+	
+	local xyInput
+	for _, input in ipairs(genome.inputSpec.data) do
+		if input.name == "XYInput" then
+			xyInput = input
+		end
+	end
+	
+	local point = xyInput.param[pointIndex]
+	point[1] = point[1] + dx
+	point[2] = point[2] + dy
+end
+NNXYBreeder:addMutation("xy",
+	MutationWithRate(xyMutation))
+-- End NNXYBreeder
 
 ---========================================---
 --- BREEDER END
@@ -2260,7 +2546,6 @@ end
 -- Interface Organism
 Organism = Interface(nil,{
 	name = "?",
-	makeDefault = abstractFunction, --()
 	birth = abstractFunction, -- ()
 	act = abstractFunction,	-- ()
 	breed = abstractFunction, -- (species)
@@ -2276,7 +2561,9 @@ BasicOrganism = Class(nil, {
 	breeder = nil,
 	executor = nil,
 	fitness = 0,
-	savedKeys = {"genome", "fitness", "name"}
+	savedKeys = {"genome", "fitness", "name"},
+	breederType = nil,
+	executorType = nil
 }):implements(Organism, Persistent)
 ClassRegistry(BasicOrganism)
 
@@ -2287,18 +2574,14 @@ function BasicOrganism:init(genome)
 	self.globalRank = 0
 end
 
-function BasicOrganism:makeDefault()
-	local default = self(self.defaultGenome:copy())
-	default:mutate()
-	return default
-end
-
 function BasicOrganism:write(persistence)
 	-- Don't save the computed configuration
 	local savedVariables = {}
 	for _, key in ipairs(self.savedKeys) do
 		savedVariables[key] = self[key]
 	end
+	savedVariables.executorName = ClassRegistry:className(self.executorType)
+	savedVariables.breederName = ClassRegistry:className(self.breederType)
 	persistence:write(savedVariables)
 end
 
@@ -2308,25 +2591,48 @@ function BasicOrganism:read(persistence)
 	for _, key in ipairs(self.savedKeys) do
 		savedObject[key] = savedVariables[key]
 	end
+	savedObject.executorType = ClassRegistry:get(savedObject.executorName)
+	savedObject.breederType = ClassRegistry:get(savedObject.breederName)
 	return savedObject
 end
 
-function BasicOrganism:birth(ioRegistry)
-	local source = ioRegistry:getInput(self.genome.inputSpec)
-	local sink = ioRegistry:getOutput(self.genome.outputSpec)
+function BasicOrganism:setExecutor(executorType)
+	self.executorType = executorType
+end
+
+function BasicOrganism:setBreeder(breederType)
+	self.breederType = breederType
+end
+
+function BasicOrganism:birth()	
+	local source, sink = self:makeIO()
+	self.source, self.sink = source, sink
+	--self.phenotype = self.genome:getConfig(source, sink)
 	self.phenotype = self:makePhenotype(source, sink)
 	self.executor = self:makeExecutor(self.phenotype, source, sink)
 	self.executor:reset()
 end
 
+function BasicOrganism:makeIO()
+	local inputSpec = self.genome:getInputSpec()
+	local outputSpec = self.genome:getOutputSpec()
+	return IORegistry:getInput(self.genome.inputSpec),
+		IORegistry:getOutput(self.genome.outputSpec)
+end
+
 function BasicOrganism:act()
-	TiledInput:prepare()
+	self.source:prepare()
+	self.sink:prepare()
 	self.executor:run()
 end
 
 function BasicOrganism:breed(species)
 	self.breeder = self:makeBreeder()
-	return self.breeder:breed(self, species)
+	local childGenome = self.breeder:breed(self, species)
+	local child = self._class(childGenome)
+	child:setExecutor(self.executorType)
+	child:setBreeder(self.breederType)
+	return child
 end
 
 function BasicOrganism:mutate()
@@ -2347,93 +2653,6 @@ end
 function BasicOrganism:getGenome()
 	return self.genome
 end
---[[
-function BasicOrganism:toPOLO()
-	local genome = self.genome
-	
-	local genomePolo = {
-		maxneuron = genome.maxneuron,
-		mutationRates = {},
-		genes = {},
-	}
-	
-	for mutation,rate in pairs(genome.mutationRates) do
-		table.insert(genomePolo.mutationRates, {
-			mutation = mutation,
-			rate = rate
-		})
-	end
-
-	for _, gene in pairs(genome.genes) do
-		table.insert(genomePolo.genes, {
-			into = gene.into,
-			out = gene.out,
-			weight = gene.weight,
-			innovation = gene.innovation,
-			enabled = gene.enabled
-		})
-	end
-	
-	local polo = {
-		name = self.name,
-		fitness = self.fitness,
-		genome = genomePolo
-	}
-	return polo
-end]]
---[[
-function BasicOrganism:save(organism, file)
-	local genome = organism.genome
-	file:write(organism.name .. "\n")
-	file:write(organism.fitness .. "\n")
-	file:write(genome.maxneuron .. "\n")
-	for mutation,rate in pairs(genome.mutationRates) do
-		file:write(mutation .. "\n")
-		file:write(rate .. "\n")
-	end
-	file:write("done\n")
-   
-	file:write(#genome.genes .. "\n")
-	for l,gene in pairs(genome.genes) do
-		file:write(gene.into .. " ")
-		file:write(gene.out .. " ")
-		file:write(gene.weight .. " ")
-		file:write(gene.innovation .. " ")
-		if(gene.enabled) then
-				file:write("1\n")
-		else
-				file:write("0\n")
-		end
-	end
-end]]
---[[
-function BasicOrganism:load(file)
-	local organism = NNOrganism:makeDefault()
-	local genome = organism.genome
-	
-	organism.name = file:read("*number")
-	organism.fitness = file:read("*number")
-	genome.maxneuron = file:read("*number")
-	local line = file:read("*line")
-	while line ~= "done" do
-		genome.mutationRates[line] = file:read("*number")
-		line = file:read("*line")
-	end
-	local numGenes = file:read("*number")
-	for n=1,numGenes do
-		local gene = NNGenome:makeGene()
-		table.insert(genome.genes, gene)
-		local enabled
-		gene.into, gene.out, gene.weight, gene.innovation, enabled = file:read("*number", "*number", "*number", "*number", "*number")
-		if enabled == 0 then
-			gene.enabled = false
-		else
-			gene.enabled = true
-		end
-	end
-	return organism
-end--]]
-
 -- End BasicOrganism
 
 -- Class NNOrganism
@@ -2442,37 +2661,6 @@ NNOrganism = Class(BasicOrganism, {
 })
 ClassRegistry(NNOrganism)
 -- End NNOrganism
-
-NNOrganism.defaultGenome = (function()
-	local genome = deepMergeInto(NNGenome(), {
-		inputSpec = IOConfig({
-			{name = "TiledInput", range = 169},
-			{name = "VelocityInput", range = 2},
-			{name = "BiasInput", range = 1}
-		}),
-		outputSpec = IOConfig({ {name = "ButtonOutput", range = 8} }),
-		genes = {},
-		fitness = 0,
-		adjustedFitness = 0,
-		network = {},
-		maxneuron = 10,
-		globalRank = 0,
-		mutationRates = {
-			connections = MutateConnectionsChance,
-			link = LinkMutationChance,
-			bias = BiasMutationChance,
-			vel = VelMutationChance,
-			node = NodeMutationChance,
-			enable = EnableMutationChance,
-			disable = DisableMutationChance,
-			step = StepSize,
-		},
-		geneNeuronMap = {}
-	})
-	genome.maxneuron = genome.inputSpec:getSize()
-	genome.maxneuron = genome.maxneuron + genome.outputSpec:getSize()
-	return genome
-end)()
 
 function NNOrganism:makePhenotype(source, sink)
 	local network = NeuralNetwork()
@@ -2489,7 +2677,6 @@ function NNOrganism:makePhenotype(source, sink)
 		neuronCount = neuronCount + 1
 	end
 
-	
 	for name, id, handle in genome.outputSpec:iterator(sink) do
 		id = network:addNeuron(Neuron:makeOutput(handle)).id
 		idMap[neuronCount] = id
@@ -2528,15 +2715,155 @@ function NNOrganism:makePhenotype(source, sink)
 end
 
 function NNOrganism:makeExecutor(phenotype, source, sink)
-	return SimpleNNExecutor(phenotype, source, sink)
+	return self.executorType(phenotype, source, sink)
 end
 
 function NNOrganism:makeBreeder()
-	return NNBreeder():addParam({crossoverChance = CrossoverChance})
+	return self.breederType():addParam({crossoverChance = CrossoverChance})
 end
 
 ---========================================---
 --- ORGANISM END
+---========================================---
+
+---========================================---
+--- MOTHER
+---
+--- Organism factory
+--- Creates the first set of organisms
+---========================================---
+
+-- Interface Mother
+Mother = Interface(nil, {
+	makeOriginal = abstractFunction
+})
+-- End Mother
+
+-- Class BasicMother
+BasicMother = Class(nil, {
+	inputSpec = {},
+	outputSpec = {},
+	genes = {},
+	genomeType = {},
+	executorType = {},
+	breederType = {},
+	organismType = {}
+}):implements(Mother)
+
+function BasicMother:setSpecHelper(spec, ioGetterFunc)
+	local finalSpec = {}
+	for _, data in ipairs(spec) do
+		local dataType = type(data)
+		local correctData
+		if dataType ~= "table" or (data.id == nil and data.range == nil) then
+			local name
+			if dataType == "table" then
+				name = data.name
+			else
+				name = dataType
+			end
+			
+			local ioConnector = ioGetterFunc( IORegistry,
+				{ data = { name = name, param = data.param }} )
+			local size = ioConnector.size
+			correctData = { name = name, range = size, param = data.param }
+		else
+			correctData = data
+		end
+		table.insert(finalSpec, correctData)
+	end
+	return finalSpec
+end
+
+-- Note that the "spec" here is looser than that required
+-- for IOConfig for convenience
+function BasicMother:setInput(spec)
+	-- Fix any unspecified sizes
+	
+	local finalSpec = self:setSpecHelper(spec, IORegistry.getInput)
+	self.inputSpec = IOConfig(finalSpec)
+	return self
+end
+
+-- Note that the "spec" here is looser than that required
+-- for IOConfig for convenience
+function BasicMother:setOutput(spec)
+	-- Fix any unspecified sizes
+	
+	local finalSpec = self:setSpecHelper(spec, IORegistry.getOutput)
+	self.outputSpec = IOConfig(finalSpec)
+	return self
+end
+
+function BasicMother:setOrganismType(typeName)
+	self.organismType = ClassRegistry:get(typeName)
+	return self
+end
+
+function BasicMother:setGenomeType(typeName)
+	self.genomeType = ClassRegistry:get(typeName)
+	return self
+end
+
+function BasicMother:setExecutor(typeName)
+	self.executorType = ClassRegistry:get(typeName)
+	return self
+end
+
+function BasicMother:setBreeder(typeName)
+	self.breederType = ClassRegistry:get(typeName)
+	return self
+end
+
+function BasicMother:setGenes(genes)
+	self.genes = genes
+	return self
+end
+
+function BasicMother:makeOriginal()
+	local genome = self.genomeType()
+	genome = deepMergeInto(genome, {
+		inputSpec = self.inputSpec,
+		outputSpec = self.outputSpec,
+		genes = self.genes,
+		fitness = 0,
+		adjustedFitness = 0,
+		network = {},
+		globalRank = 0,
+		mutationRates = {
+			connections = MutateConnectionsChance,
+			link = LinkMutationChance,
+			bias = BiasMutationChance,
+			vel = VelMutationChance,
+			node = NodeMutationChance,
+			enable = EnableMutationChance,
+			disable = DisableMutationChance,
+			step = StepSize,
+			-- XYInput mutation
+			xy = XYMutationChance
+		},
+		geneNeuronMap = {}
+	})
+	genome.maxneuron = genome.inputSpec:getSize() + genome.outputSpec:getSize()
+	local originalOrganism = self.organismType(genome)
+	originalOrganism:setExecutor(self.executorType)
+	originalOrganism:setBreeder(self.breederType)
+	originalOrganism:mutate()
+	return originalOrganism
+end
+-- End BasicMother
+
+-- Class NNMother
+NNMother = Class(BasicMother, {
+	genomeType = NNGenome,
+	executorType = NNExecutor,
+	breederType = NNBreeder,
+	organismType = NNOrganism
+})
+-- End NNMother
+
+---========================================---
+--- MOTHER END
 ---========================================---
 
 ---========================================---
@@ -2581,28 +2908,6 @@ function Species:organismIter()
 		return self.organisms[i], i
 	end
 end
---[[
-function Species:load(file)
-	local species = Species(i)
-	species.name = file:read("*number")
-	species.topFitness = file:read("*number")
-	species.staleness = file:read("*number")
-	local numGenomes = file:read("*number")
-	for g=1,numGenomes do
-		species:addOrganism(BasicOrganism:load(file))
-	end
-	return species
-end
-
-function Species:save(species, file)
-	file:write(species.name .. "\n")
-	file:write(species.topFitness .. "\n")
-	file:write(species.staleness .. "\n")
-	file:write(#species.organisms .. "\n")
-	for m,organism in pairs(species.organisms) do
-		BasicOrganism:save(organism, file)
-	end
-end]]
 -- End Species
 
 ---========================================---
@@ -2788,7 +3093,7 @@ function Population:newGeneration()
         end
         for c=1,#children do
                 local child = children[c]
-                self:addOrganism(NNOrganism(child))
+                self:addOrganism(child)
         end
        
         self.generation = self.generation + 1
@@ -2822,11 +3127,11 @@ function Population:loadPool()
 	self:loadFile(filename)
 end
 
-function Population:makeStarter()
+function Population:makeStarter(mother)
 	local pop = Population(PopulationMax)
 	
 	for i=1,PopulationMax do
-		pop:addOrganism(NNOrganism:makeDefault())
+		pop:addOrganism(mother:makeOriginal())
 	end
 
 	return pop
@@ -3021,7 +3326,7 @@ function GenomeSimulation:setup(param)
 	
 	--local organism = genome:makeOrganism(IORegistry)
 	--organism:reset()
-	self.organism:birth(IORegistry)
+	self.organism:birth()
 	
 	self.evaluator:setOrganism(self.organism)
 	self.evaluator:setup()
@@ -3366,9 +3671,11 @@ function NNUI:init(...)
 end
 
 function NNUI:drawCell(cell)
-	local x, y, value = cell.x, cell.y, cell.value
+	local x, y, value, hideBorder = cell.x, cell.y, cell.value, cell.hideBorder
 	
 	local color = math.floor((value+1)/2*256)
+	local border = 0x00000000
+	
 	if color > 255 then color = 255 end
 	if color < 0 then color = 0 end
 	local opacity = 0xFF000000
@@ -3376,7 +3683,10 @@ function NNUI:drawCell(cell)
 		opacity = 0x50000000
 	end
 	color = opacity + color*0x10000 + color*0x100 + color
-	gui.drawBox(x-2,y-2,x+2,y+2,opacity,color)
+	if not hideBorder then
+		border = opacity
+	end
+	gui.drawBox(x-2,y-2,x+2,y+2,border,color)
 end
 
 function NNUI:drawTiledInput(x, y, offset)
@@ -3453,10 +3763,44 @@ function NNUI:drawVelocity(x, y, offset)
 	return x, y+10
 end
 
+function NNUI:drawXYInput(x, y, offset)
+	local i = offset
+	local network = self.network
+	local points = self.data.param
+
+	if points == nil then return x, y end -- No points to draw
+	if self.needCellGeneration then
+		for _, point in ipairs(points) do
+			local px = point[1]
+			local py = point[2]
+			cell = {
+				x = x +32 + 5*px/16,
+				y = y +32 + 5*py/16,
+				neuron = network.inputNeurons[i],
+				value = network.inputNeurons[i].value,
+				--requireInput = true,
+				hideBorder = true,
+				fixed = true
+			}
+			table.insert(self.inputCells, cell)
+			table.insert(self.cells, cell)
+			i = i + 1
+		end
+	end
+	
+	gui.drawBox(x, y, x+5+2*BoxRadius*5-1, y+5+2*BoxRadius*5-1,0xFF000000, 0x80808080)
+	
+	-- Mario box
+	gui.drawBox(x+29 +2,y+31+2,x+31+2,y+38+2,0x00000000,0x80FF0000)
+	
+	return x, y + 5+2*BoxRadius*5+5
+end
+
 NNUI.inputDrawers = {
 	TiledInput = "drawTiledInput",
 	BiasInput = "drawBias",
-	VelocityInput = "drawVelocity"
+	VelocityInput = "drawVelocity",
+	XYInput = "drawXYInput"
 }
 
 function NNUI:drawInput(x, y)
@@ -3468,43 +3812,16 @@ function NNUI:drawInput(x, y)
 	
 	local inputConfig = self.inputConfig
 	for _, data in ipairs(inputConfig:getData()) do
+		self.data = data
 		local name = data.name
 		local layout = inputConfig:layoutInfo(name)
 		local offset, size = layout.offset, layout.size
 		
 		local drawer = self.inputDrawers[name]
-		x, y = self[drawer](self, x, y, offset, size)
-	end
-	--x, y = self:drawTiledInput(x, y)
-	--x, y = self:drawBias(x, y)
-	--[[
-		local i = 1
-		for row = 0, 2*BoxRadius do
-			for col = 0, 2*BoxRadius do
-				cell = {
-					x = 20 + 5*col,
-					y = 40 + 5*row,
-					neuron = network.inputNeurons[i],
-					value = network.inputNeurons[i].value,
-					fixed = true
-				}
-				table.insert(self.inputCells, cell)
-				table.insert(self.cells, cell)
-				i = i + 1
-			end
+		if drawer then
+			x, y = self[drawer](self, x, y, offset, size)
 		end
-		
-		local biasCell = {
-			x = 80,
-			y = 110,
-			neuron = network.inputNeurons[#network.inputNeurons],
-			value = network.inputNeurons[#network.inputNeurons].value,
-			fixed = true
-		}
-		table.insert(self.inputCells, biasCell)
-		table.insert(self.cells, biasCell)
-	end--]]
-	
+	end
 	
 	for _, cell in ipairs(self.inputCells) do
 		cell.value = cell.neuron.value
@@ -3559,44 +3876,63 @@ function NNUI:drawOutput(x, y)
 	end
 end
 
-function NNUI:organizeNetwork(count)
+function NNUI.applyBoundary(point, boundary)
+	if point.x < boundary.left then
+		point.x = boundary.left
+	elseif point.x > boundary.right then
+		point.x = boundary.right
+	end
+	
+	if point.y < boundary.top then
+		point.y = boundary.top
+	elseif point.y > boundary.bottom then
+		point.y = boundary.bottom
+	end
+end
+
+function NNUI:organizeNetwork(count, boundary)
 	local cells = self.cells
 	for n=1,count do
 		for _,link in ipairs(self.links) do
 			local sourceId = link.from
 			local sinkId = link.to
 			local weight = link.weight
-			
 			local c1 = cells[sourceId]
 			local c2 = cells[sinkId]
 			
 			if not c1.fixed then
 				c1.x = 0.75*c1.x + 0.25*c2.x
 				if c1.x >= c2.x then
-						c1.x = c1.x - 40
+					c1.x = c1.x - 40
 				end
+				--[[
 				if c1.x < 90 then
-						c1.x = 90
+					c1.x = 90
 				end
 			   
 				if c1.x > 220 then
-						c1.x = 220
-				end
+					c1.x = 220
+				end--]]
 				c1.y = 0.75*c1.y + 0.25*c2.y
+				
+				self.applyBoundary(c1, boundary)
 			end
 			
 			if not c2.fixed then
 				c2.x = 0.25*c1.x + 0.75*c2.x
 				if c1.x >= c2.x then
-						c2.x = c2.x + 40
+					c2.x = c2.x + 40
 				end
+				--[[
 				if c2.x < 90 then
-						c2.x = 90
+					c2.x = 90
 				end
 				if c2.x > 220 then
-						c2.x = 220
-				end
+					c2.x = 220
+				end]]
 				c2.y = 0.25*c1.y + 0.75*c2.y
+				
+				self.applyBoundary(c2, boundary)
 			end
 		end
 	end
@@ -3619,7 +3955,10 @@ function NNUI:drawHidden()
 			table.insert(self.cells, cell)
 		end
 		
-		self:organizeNetwork(4)
+		self:organizeNetwork(4, {
+			left = 90, right = 210,
+			top = 0, bottom = 256
+		})
 	end
 	
 	for _, cell in ipairs(self.hiddenCells) do
@@ -3653,9 +3992,6 @@ function NNUI:drawLinks()
 	end
 end
 
-function NNUI:drawMario()
-end
-
 function NNUI:draw()
 	local organism = popSim.activeOrganism
 	--if genome.organism == nil then return end
@@ -3679,7 +4015,6 @@ function NNUI:draw()
 	self:drawOutput()
 	self:drawHidden()
 	self:drawLinks()
-	self:drawMario()
 end
 -- End NNUI
 
@@ -3735,7 +4070,7 @@ function ConfigUI:show()
 	self.showNetworkCheck = forms.checkbox(form, "Show Map", 5, 30)
 	self.showMutationRatesCheck = forms.checkbox(form, "Show M-Rates", 5, 52)
 	self.restartButton = forms.button(form, "Restart", function()
-			popSim = PopulationSimulation(Population:makeStarter(), nil)
+			popSim = PopulationSimulation(Population:makeStarter(mother), nil)
 		end, 5, 77)
 		
 	self.saveButton = forms.button(form, "Save", function()
@@ -3795,7 +4130,7 @@ end
 --- UI END
 ---========================================---
 
-PopulationMax = 10
+PopulationMax = 200
 DeltaDisjoint = 2.0
 DeltaWeights = 0.4
 DeltaThreshold = 1.0
@@ -3817,10 +4152,38 @@ TimeoutConstant = 20
  
 MaxNodes = 1000000
 
+XYMutationChance = 0.75
+XYDistance = 8
+
 newInnovation = makeUniqueIdGenerator()
 
+mother = NNMother()
+		:setInput({
+			{name = "TiledInput", range = 169},
+			{name = "VelocityInput", range = 2},
+			{name = "BiasInput", range = 1}
+		})
+		:setOutput({ {name = "ButtonOutput", range = 8} })
+
+local fullParam = {}
+for i = -6, 6 do
+	for j = -6, 6 do
+		table.insert(fullParam, {i*16, j*16})
+	end
+end
+
+motherXY = NNMother()
+		:setInput({
+			{name = "XYInput", param = fullParam},
+			{name = "VelocityInput", range = 2},
+			{name = "BiasInput", range = 1}
+		})
+		:setOutput({ {name = "ButtonOutput", range = 8} })
+		:setBreeder(NNXYBreeder)
+
+mother = motherXY
 popSim = nil
-popSim = PopulationSimulation(Population:makeStarter(), nil)
+popSim = PopulationSimulation(Population:makeStarter(mother), nil)
 
 -- Show Form
 ConfigUI:show()

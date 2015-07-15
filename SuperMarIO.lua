@@ -696,12 +696,12 @@ POLOPersistence = Class(BasicPersistence)
 
 function POLOPersistence:save(object)
 	--DEBUG("Saving...")
-	--local polo = self:toPOLO(object)
-	--persistence.store(self.filename, polo)
+	local polo = self:toPOLO(object)
+	persistence.store(self.filename, polo)
 end
 
 function POLOPersistence:load()
-	--return persistence.load(self.filename)
+	return persistence.load(self.filename)
 end
 
 --[[
@@ -838,15 +838,15 @@ local s24 = mainmemory.read_s24_le
 Game = Interface(nil, {
 	defaultState = "0.state",
 	buttonsNames = { },
-	marioX = 0,
-	marioY = 0,
-	screenX = 0,
-	screenY = 0,
+	--marioX = 0,
+	--marioY = 0,
+	--screenX = 0,
+	--screenY = 0,
 	
 	readValues = abstractFunction, -- ()
-	getTile = abstractFunction, -- (x, y)
-	getSprites = abstractFunction, -- ()
-	getExtendedSprites = abstractFunction, -- ()
+	--getTile = abstractFunction, -- (x, y)
+	--getSprites = abstractFunction, -- ()
+	--getExtendedSprites = abstractFunction, -- ()
 })
 -- End Game
 
@@ -897,12 +897,17 @@ end
 function SMW:getSprites()
 	local sprites = {}
 	for slot=0,11 do
-			local status = memory.readbyte(0x14C8+slot)
-			if status ~= 0 then
-					spritex = memory.readbyte(0xE4+slot) + memory.readbyte(0x14E0+slot)*256
-					spritey = memory.readbyte(0xD8+slot) + memory.readbyte(0x14D4+slot)*256
-					sprites[#sprites+1] = {["x"]=spritex, ["y"]=spritey}
-			end
+		local status = memory.readbyte(0x14C8+slot)
+		if status ~= 0 then
+			local spritex = memory.readbyte(0xE4+slot) + memory.readbyte(0x14E0+slot)*256
+			local spritey = memory.readbyte(0xD8+slot) + memory.readbyte(0x14D4+slot)*256
+			local spritevalue = memory.readbyte(0x009E+slot)
+			sprites[#sprites+1] = {
+				x = spritex,
+				y = spritey,
+				value = spritevalue
+			}
+		end
 	end            
    
 	return sprites
@@ -911,12 +916,16 @@ end
 function SMW:getExtendedSprites()
 	local extended = {}
 	for slot=0,11 do
-			local number = memory.readbyte(0x170B+slot)
-			if number ~= 0 then
-					spritex = memory.readbyte(0x171F+slot) + memory.readbyte(0x1733+slot)*256
-					spritey = memory.readbyte(0x1715+slot) + memory.readbyte(0x1729+slot)*256
-					extended[#extended+1] = {["x"]=spritex, ["y"]=spritey}
-			end
+		local number = memory.readbyte(0x170B+slot)
+		if number ~= 0 then
+			local spritex = memory.readbyte(0x171F+slot) + memory.readbyte(0x1733+slot)*256
+			local spritey = memory.readbyte(0x1715+slot) + memory.readbyte(0x1729+slot)*256
+			extended[#extended+1] = {
+				x = spritex,
+				y = spritey,
+				value = 0x100
+			}
+		end
 	end            
    
 	return extended;
@@ -943,7 +952,7 @@ SMB = Class(nil, {
 function SMB:readValues()
 	self.marioX = memory.readbyte(0x6D) * 0x100 + memory.readbyte(0x86)
 	self.marioY = memory.readbyte(0x03B8)+16
-	   
+	
 	self.screenX = memory.readbyte(0x03AD)
 	self.screenY = memory.readbyte(0x03B8)
 	
@@ -993,12 +1002,153 @@ end
 
 -- End SMB
 
+-- Class SF
+
+-- Uses values/code from a mame lua script
+SF = Class(nil, {
+	defaultState = "SF.state",
+	buttonNames = {
+                "A",
+                "B",
+                "X",
+                "Y",
+				"L",
+				"R",
+                "Up",
+                "Down",
+                "Left",
+                "Right",
+    },
+	address = {
+		player      = 0x0C00,
+		screen_left = 0x19E7,
+	},
+	player_space       = 0x200,
+	box_list = {
+		{addr_table = 0xA, id_ptr = 0xD, id_space = 0x04, type = "push"},
+		{addr_table = 0x0, id_ptr = 0x8, id_space = 0x04, type = "vulnerability"},
+		{addr_table = 0x2, id_ptr = 0x9, id_space = 0x04, type = "vulnerability"},
+		{addr_table = 0x4, id_ptr = 0xA, id_space = 0x04, type = "vulnerability"},
+		{addr_table = 0x6, id_ptr = 0xB, id_space = 0x04, type = "weak"},
+		{addr_table = 0x8, id_ptr = 0xC, id_space = 0x0C, type = "attack"},
+	},
+	players = {}
+}):implements(Game);
+
+local read_hitbox_s8 = function(addr)
+	memory.usememorydomain("CARTROM")
+	return memory.read_s8(0x030000 + addr)
+end
+
+local read_hitbox_u8 = function(addr)
+	memory.usememorydomain("CARTROM")
+	return memory.read_u8(0x030000 + addr)
+end
+
+local read_hitbox_s16 = function(addr)
+	memory.usememorydomain("CARTROM")
+	return memory.read_s16_le(0x030000 + addr)
+end
+
+local get_box_parameters = function(box)
+		box.val_x  = read_hitbox_s8(box.address + 0)
+		box.val_x2 =  read_hitbox_u8(box.address + 5)
+		if box.val_x2 >= 0x80 and box.type == "attack" then
+			box.val_x = -box.val_x2
+		end
+		box.val_y  = read_hitbox_s8(box.address + 1)
+		box.rad_x  =  read_hitbox_u8(box.address + 2)
+		box.rad_y  =  read_hitbox_u8(box.address + 3)
+end
+
+local process_box_type = {
+	["vulnerability"] = function(obj, box)
+	end,
+
+	["attack"] = function(obj, box)
+		if obj.projectile then
+			box.type = "proj. attack"
+		elseif u8(obj.base + 0x03) == 0 then
+			return false
+		end
+	end,
+
+	["push"] = function(obj, box)
+		if obj.projectile then
+			box.type = "proj. vulnerability"
+		end
+	end,
+
+	["weak"] = function(obj, box)
+		if u8(obj.animation_ptr + 0x15) ~= 2 then
+			return false
+		end
+	end,
+}
+
+local define_box = function(obj, box_entry)
+	local box = {
+		type = box_entry.type,
+		id = u8(obj.animation_ptr + box_entry.id_ptr),
+	}
+	if box.id == 0 or process_box_type[box.type](obj, box) == false then
+		return nil
+	end
+	
+	-- 0x30000 instead of 0x70000 for some reason
+	local offset = read_hitbox_s16(obj.hitbox_ptr + box_entry.addr_table)
+	local addr_table = obj.hitbox_ptr + offset
+	--DEBUG(addr_table)
+	box.address = addr_table + box.id * box_entry.id_space
+	--DEBUG(box.address)
+	get_box_parameters(box)
+
+	box.val_x  = obj.pos_x + box.val_x * (obj.flip_x == 1 and -1 or 1)
+	box.val_y  = obj.pos_y - box.val_y
+	box.left   = box.val_x - box.rad_x
+	box.right  = box.val_x + box.rad_x
+	box.top    = box.val_y - box.rad_y
+	box.bottom = box.val_y + box.rad_y
+
+	return box
+end
+
+local update_object = function(f, obj)
+	obj.pos_x         = s16(obj.base + 0x07)
+	obj.pos_y         = s16(obj.base + 0x0A)
+	obj.flip_x        = u8(obj.base + 0x14) / 0x40
+	--obj.animation_ptr = u16(obj.base + 0x1A)
+	obj.animation_ptr = obj.base + 0x32
+	obj.hitbox_ptr    = u16(obj.base + 0x22)
+	obj.health        = u8(obj.base + 0x2B)
+	obj.victories     = u8(obj.base + 0xD0)
+	for _, box_entry in ipairs(SF.box_list) do
+		table.insert(obj, define_box(obj, box_entry))
+	end
+	return obj
+end
+
+function SF:readValues()
+	for p = 1, 2 do
+		local f = {}
+		local player = {base = self.address.player + (p-1) * self.player_space}
+		self.players[p] = update_object(f, player)
+	end
+	self.screen_left = u16(self.address.screen_left)
+	self.timer = u8(0x1AC8)
+	self.timer = math.floor(self.timer/16)*10 + self.timer%16
+end
+
+-- End SF
+
 currentGame = nil
 
 if gameinfo.getromname() == "Super Mario World (USA)" then
 	currentGame = SMW
 elseif gameinfo.getromname() == "Super Mario Bros." then
 	currentGame = SMB
+elseif gameinfo.getromname() == "Street Fighter II (USA)" then
+	currentGame = SF
 end
 
 Filename = currentGame.defaultState
@@ -1008,7 +1158,8 @@ ButtonNames = currentGame.buttonNames
 
 -- Class JoypadUtil
 JoypadUtil = Class(nil, {
-	controller = {}
+	controller = {},
+	lastController = {}
 })
 
 -- Must apply every frame
@@ -1017,6 +1168,7 @@ function JoypadUtil:apply()
 end
 
 function JoypadUtil:set(buttons)
+	self.lastController = self.controller
 	self.controller = {}
 	local controller = self.controller
 	
@@ -1035,6 +1187,16 @@ function JoypadUtil:set(buttons)
 	end
 	
 	self:apply()
+end
+
+function JoypadUtil:didInputChange()
+	-- Slightly inaccurate
+	for key, value in pairs(self.controller) do
+		if self.lastController[key] ~= value then
+			return true
+		end
+	end
+	return false
 end
 
 function JoypadUtil:clear()
@@ -1431,7 +1593,67 @@ end
 IORegistry:registerInput("VelocityInput", VelocityInput)
 -- End VelocityInput
 
--- XYInput
+-- Class SpriteInput
+--BoxRadius = 6
+--InputSize = (BoxRadius*2+1)*(BoxRadius*2+1)
+
+local VALUE_MULT = 0x40
+SpriteInput = Class(nil, {
+	sensed = {},
+	size = InputSize,
+}):implements(Input)
+ClassRegistry(SpriteInput)
+
+function SpriteInput:prepare()
+	currentGame:readValues()
+   
+	local sprites = currentGame:getSprites()
+	local extended = currentGame:getExtendedSprites()
+   
+	local id = 1
+	local inputs = self.sensed
+	
+	for dy=-BoxRadius*16,BoxRadius*16,16 do
+		for dx=-BoxRadius*16,BoxRadius*16,16 do
+	
+			inputs[id] = 0
+		   
+			tile = currentGame:getTile(dx, dy)
+			if tile == 1 and marioY+dy < 0x1B0 then
+					inputs[id] = 1
+			end
+		   
+			for i = 1,#sprites do
+					distx = math.abs(sprites[i]["x"] - (marioX+dx))
+					disty = math.abs(sprites[i]["y"] - (marioY+dy))
+					value = sprites[i].value / VALUE_MULT
+					if distx <= 8 and disty <= 8 then
+							inputs[id] = -value
+					end
+			end
+
+			for i = 1,#extended do
+					distx = math.abs(extended[i]["x"] - (marioX+dx))
+					disty = math.abs(extended[i]["y"] - (marioY+dy))
+					value = extended[i].value / VALUE_MULT
+					if distx < 8 and disty < 8 then
+							inputs[id] = -value
+					end
+			end
+			
+			id = id + 1
+		end
+	end
+end
+
+function SpriteInput:get(id)
+	return self.sensed[id]
+end
+
+IORegistry:registerInput("SpriteInput", SpriteInput)
+-- End SpriteInput
+
+-- Class XYInput
 XYInput = Class(nil, {
 	coordinates = {},
 	sensed = {},
@@ -1486,6 +1708,97 @@ end
 
 IORegistry:registerInput("XYInput", XYInput)
 -- End XYInput
+
+-- Class HitboxInput
+Floats = { "enemy_attackx", "enemy_pushx", "enemy_pushy",
+	"my_attackx", "my_y" }
+Frequencies = {{21, 1}, {34, 2}, {55, 3}}
+HitboxInput = Class(nil, {
+	sensed = {},
+	size = #Floats * (1+#Frequencies),
+}):implements(Input)
+ClassRegistry(HitboxInput)
+
+function HitboxInput:getFloats()
+	local floats = {} -- Values to measure
+	
+	local px = currentGame.players[1].pos_x
+	local py = currentGame.players[1].pos_y
+	local flip = not (currentGame.players[1].flip_x ~= 0)
+	local float
+	
+	-- Enemy boxes
+	for _, box in ipairs(currentGame.players[2]) do
+		if box.type == "attack" then
+			float = box.left
+			if flip then float = box.right end
+			floats.enemy_attackx = float - px
+		elseif box.type == "push" then
+			float = box.left
+			if flip then float = box.right end
+			floats.enemy_pushx = float - px
+			floats.enemy_pushy = box.top - py
+		end
+	end
+	
+	for _, box in ipairs(currentGame.players[1]) do
+		if box.type == "attack" then
+			float = box.right
+			if flip then float = box.left end
+			floats.my_attackx = float - px
+		elseif box.type == "push" then
+			floats.my_y = box.bottom
+		end
+	end
+	
+	if flip then
+		for k, v in pairs(floats) do
+			floats[k] = -v
+		end
+	end
+	
+	return floats
+end
+
+function HitboxInput:calcFreq(float)
+	if float == nil then
+		return {0, 0, 0, 0}
+	end
+	
+	local freqResults = {1, 0, 0, 0}
+	for index, freqData in ipairs(Frequencies) do
+		local freq = freqData[1]
+		local offset = freqData[2]
+		
+		local _, value = math.modf((float-offset)/freq)
+		if value < 0 then value = value + 1 end
+		value = value*2 - 1
+		freqResults[index+1] = value
+	end
+	return freqResults
+end
+
+function HitboxInput:prepare()
+	currentGame:readValues()
+
+	local floats = self:getFloats()
+	local id = 1
+	for _, freqKey in ipairs(Floats) do
+		local float = floats[freqKey]
+		local results = self:calcFreq(float)
+		for _, value in ipairs(results) do
+			self.sensed[id] = value
+			id = id + 1
+		end
+	end
+end
+
+function HitboxInput:get(id)
+	return self.sensed[id]
+end
+
+IORegistry:registerInput("HitboxInput", HitboxInput)
+-- End HitboxInput
 
 ---========================================---
 --- INPUT END
@@ -1571,6 +1884,51 @@ end
 
 IORegistry:registerOutput("ButtonOutput", ButtonOutput)
 -- End ButtonOutput
+
+-- Class ReflectButtonOutput
+ReflectButtonOutput = Class(nil, {
+	size = #ButtonNames,
+	buffer = {}
+}):implements(Output)
+ClassRegistry(ReflectButtonOutput)
+
+function ReflectButtonOutput:prepare()
+	for k, v in pairs(self.buffer) do
+		self.buffer[k] = 0
+	end
+end
+
+function ReflectButtonOutput:set(id, value)
+	self.buffer[id] = value
+end
+
+function ReflectButtonOutput:send()
+	local buttons = {}
+	
+	local flip = not (currentGame.players[1].flip_x ~= 0)
+	local buttonNames = currentGame.buttonNames
+	for o=1,#buttonNames do
+		local button = buttonNames[o]
+		
+		if flip then
+			if button == "Left" then
+				button = "Right"
+			elseif button == "Right" then
+				button = "Left"
+			end
+		end
+		if self.buffer[o] ~= nil and self.buffer[o] > 0 then
+			buttons[button] = true
+		else
+			buttons[button] = false
+		end
+	end
+	--ButtonsToPress = buttons
+	JoypadUtil:set(buttons)
+end
+
+IORegistry:registerOutput("ReflectButtonOutput", ReflectButtonOutput)
+-- End ReflectButtonOutput
 
 ---========================================---
 --- OUTPUT END
@@ -1752,8 +2110,15 @@ end
 -- Interface Executor
 -- Network executor
 Executor = Interface(Filter, {
-	source = {},
-	sink = {},
+	setPhenotype = function(self, phenotype)
+		self.phenotype = phenotype
+	end,
+	setSource = function(self, source)
+		self.source = source
+	end,
+	setSink = function(self, sink)
+		self.sink = sink
+	end,
 })
 -- End Interface
 
@@ -1772,11 +2137,13 @@ NNExecutor = Class(nil, {
 }):implements(Executor)
 ClassRegistry(NNExecutor)
 
-function NNExecutor:init(nn, source, sink)
+function NNExecutor:init()
 	values = {}
-	self.neuralNetwork = nn
-	self.source = source
-	self.sink = sink
+end
+
+function NNExecutor:setPhenotype(phenotype)
+	self.phenotype = phenotype
+	self.neuralNetwork = phenotype.network
 end
 
 function NNExecutor:copy(other)
@@ -1920,32 +2287,119 @@ end
 
 -- Override this
 -- Private
-function Genome:computeConfig(source, sink)
+function Genome:computePhenotype(source, sink)
 	return nil
 end
 
-function Genome:getConfig(source, sink)
-	if self.config ~= nil then
-		return self.config
+function Genome:getPhenotype(source, sink)
+	if self.config == nil then
+		self.config = self:computePhenotype(source, sink)
 	end
-	self.config = self:computeConfig(source, sink)
 	return self.config
 end
 
 -- Override this
-function Genome:makeBaseOrganism(config)
-	return Filter(config);
+-- Private
+function Genome:computeMutationData(source, sink)
+	return nil
 end
 
--- Returns the 'organism' (a filter) which can be run
-function Genome:makeOrganism(ioCollection)
-	local source = ioCollection:getInput(self.inputSpec)
-	local sink = ioCollection:getOutput(self.outputSpec)
-
-	return self:makeBaseOrganism(self:getConfig(source, sink),
-		source, sink)
+function Genome:getMutationData(source, sink)
+	if self.mutationData == nil then
+		self.mutationData = self:computeMutationData(source, sink)
+	end
+	return self.mutationData
 end
 -- End Genome
+
+-- Class ChromosomeGenome
+ChromosomeGenome = Class(Genome, {
+	savedKeys = {"genes", "chromosomes"},
+	weights = {},
+	chromosomes = {}
+})
+ClassRegistry(ChromosomeGenome)
+
+function ChromosomeGenome:init()
+	self.genes = {}
+	self.chromosomes = {}
+	self.weights = {}
+end
+
+function ChromosomeGenome:copy(other)
+	local o = self._base.copy(self, other)
+	
+	local o = self()
+	
+	o.chromosomes = shallowCopy(other.chromosomes)
+	o.weights = shallowCopy(other.weights)
+	
+	return o
+end
+
+function ChromosomeGenome:addChromosomes(chomosomes, weights)
+	for index, chromosome in chromosomes do
+		table.insert(self.chromosomes, chromosome)
+		if weights[index] then
+			local weight = weights[index]
+			self.weights[#self.chromosomes] = weight
+		end
+	end
+end
+
+function ChromosomeGenome:makeGene()
+	local gene = {}
+	for _, chomosome in ipairs(self.chromosomes) do
+		mergeInto(gene, chromosome:getDefaultGenes())
+	end
+	return gene
+end
+
+function ChromosomeGenome:getInputSpec()
+	local inputSpec = {}
+	for _, chomosome in ipairs(self.chromosomes) do
+		mergeInto(inputSpec, chromosome:getInputSpec())
+	end
+	self.inputSpec = inputSpec
+	return inputSpec
+end
+
+function ChromosomeGenome:getOutputSpec()
+	local outputSpec = {}
+	for _, chomosome in ipairs(self.chromosomes) do
+		mergeInto(outputSpec, chromosome:getOutputSpec())
+	end
+	self.outputSpec = outputSpec
+	return outputSpec
+end
+
+function ChromosomeGenome:computePhenotype(source, sink)
+	local phenotype = {}
+	for _, chomosome in ipairs(self.chromosomes) do
+		mergeInto(phenotype, chromosome:makePhenotype(self.genes))
+	end
+	return phenotype
+end
+	
+function ChromosomeGenome:computeMutationData(source, sink)
+	local mutationData = {}
+	for _, chromosome in ipairs(self.chromosomes) do
+		mergeInto(mutationData, chromosome:makeMutationData(self.genes))
+	end
+	return mutationData
+end
+
+function ChromosomeGenome:difference(genes2)
+	local genes1 = self.genes
+	local totalDifference = 0
+	for index, chromosome in ipairs(self.chromosomes) do
+		local difference = chromosome:difference(genes1, genes2)
+		local weight = self.weights[index] or 1
+		totalDifference = totalDifference + weight*difference
+	end
+	return totalDifference
+end
+-- End ChromosomeGenome
 
 -- Class NNGenome
 NNGenome = Class(Genome, {
@@ -1957,7 +2411,7 @@ function NNGenome:init()
 	self.genes = {}
 	self.fitness = 0
 	self.adjustedFitness = 0
-	self.network = {}
+	self.network = nil
 	self.maxneuron = 0
 	self.neuronCount = 0
 	self.globalRank = 0
@@ -1998,7 +2452,7 @@ function NNGenome:newNeuron()
 end
 
 -- The configuration is the network
-function NNGenome:computeConfig(source, sink)
+function NNGenome:computePhenotype(source, sink)
 	local network = NeuralNetwork()
 	
 	local id
@@ -2045,12 +2499,13 @@ function NNGenome:computeConfig(source, sink)
 			--table.insert(neuron.incoming, gene)
 		end
 	end
-		   
-	return network
+	
+	self.network = network
+	return { network = network }
 end
 
-function NNGenome:makeBaseOrganism(config, source, sink)
-	return NNExecutor(config, source, sink)
+function NNGenome:computeMutationData(source, sink)
+	return self.mutationRates
 end
 
 function NNGenome:difference(other)
@@ -2166,13 +2621,6 @@ function SimpleMutation:addParam(initParam)
 	mergeInto(self.param, initParam)
 	return self
 end
---[[
-function SimpleMutation:make(mutator)
-	local o = self:new()
-	o.mutator = mutator
-	
-	return o
-end]]--
 
 function SimpleMutation:mutate(genome)
 	self.mutator(self.param, genome)
@@ -2196,29 +2644,30 @@ function MutationWithRate:mutate(genome)
 end
 -- End MutationWithRate
 
--- Interface IBreeder
-IBreeder = Interface(nil, {
-	addMutation = abstractFunction,
+-- Interface Breeder
+Breeder = Interface(nil, {
 	addParam = abstractFunction,
+	setData = function(self, data)
+		self.data = data
+	end,
 	breed = abstractFunction
 })
--- End IBreeder
+-- End Breeder
 
--- Abstract Class Breeder
-Breeder = Class(nil, {
+-- Abstract Class MutationBreeder
+MutationBreeder = Class(nil, {
 	param = {},
+	data = {},
 	mutations = {}
-}):implements(IBreeder)
-ClassRegistry(Breeder)
+}):implements(Breeder)
+ClassRegistry(MutationBreeder)
 
-function Breeder:init()
+function MutationBreeder:init()
 	self.param = shallowCopy(self._base.param)
 	self.mutations = shallowCopy(self._base.mutations)
---writeTableToConsole(self._base.mutations)
---writeTableToConsole(self.mutations)
 end
 
-function Breeder:addMutation(name, mutation, initParam)
+function MutationBreeder:addMutation(name, mutation, initParam)
 	if initParam ~= nil then
 		mergeInto(mutation.param, initParam)
 	end
@@ -2226,7 +2675,7 @@ function Breeder:addMutation(name, mutation, initParam)
 end
 
 -- Parameters for mutations use [mutationName]:[key] format
-function Breeder:addParam(param)
+function MutationBreeder:addParam(param)
 	local mutation, key
 	for k, v in pairs(param) do
 		if string.find(k, "^%w+:") then
@@ -2243,25 +2692,25 @@ function Breeder:addParam(param)
 	return self
 end
 
-function Breeder:wantSex(genome)
+function MutationBreeder:wantSex(genome)
 	return false
 end
 
-function Breeder:asexualReproduction(genome)
+function MutationBreeder:asexualReproduction(genome)
 	return genome:copy()
 end
 
-function Breeder:sexualReproduction(g1, g2)
+function MutationBreeder:sexualReproduction(g1, g2)
 	local child = g1:copy()
 	mergeInto(child.genes, g2.genes)
 	return child
 end
 
-function Breeder:choosePartner(genome, pool)
+function MutationBreeder:choosePartner(genome, pool)
 	return nil
 end
 
-function Breeder:reproduce(genome, pool)
+function MutationBreeder:reproduce(genome, pool)
 	local child
 	local partner
 	if self:wantSex(genome) then
@@ -2269,20 +2718,19 @@ function Breeder:reproduce(genome, pool)
 	end
 	if partner == nil then
 		child = self:asexualReproduction(genome)
-
 	else
 		child = self:sexualReproduction(genome, partner)
 	end
 	return child
 end
 
-function Breeder:mutate(genome)
+function MutationBreeder:mutate(genome)
 	for _, mutation in pairs(self.mutations) do
 		mutation:mutate(genome)
 	end
 end
 
-function Breeder:breed(organism, organisms)
+function MutationBreeder:breed(organism, organisms)
 	local genome = organism.genome
 
 	local pool = {}
@@ -2296,7 +2744,7 @@ end
 -- End Breeder
 
 -- Class NNBreeder
-NNBreeder = Class(Breeder, {
+NNBreeder = Class(MutationBreeder, {
 	mutations = {}
 })
 ClassRegistry(NNBreeder)
@@ -2461,7 +2909,8 @@ function NNBreeder:choosePartner(genome, pool)
 end
 
 function NNBreeder:mutate(genome)
-	for mutation,rate in pairs(genome.mutationRates) do
+	local mutationRates = self.data
+	for mutation,rate in pairs(mutationRates) do
 		if math.random(1,2) == 1 then
 			genome.mutationRates[mutation] = 0.95*rate
 		else
@@ -2470,13 +2919,10 @@ function NNBreeder:mutate(genome)
 	end
 	
 	local param = {}
-	-- Add xy for XYInput
-	local mutationTypes = {"connections", "link", "bias",
-		"node", "enable", "disable", "xy"}
-	for _, typeName in ipairs(mutationTypes) do
-		param[typeName..":rate"] = genome.mutationRates[typeName]
+	for mutationName, mutationRate in ipairs(mutationRates) do
+		param[typeName..":rate"] = mutationRate
 	end
-	param["connections:step"] = genome.mutationRates["step"]
+	param["connections:step"] = mutationRates["step"]
 	
 	self:addParam(param)
 	
@@ -2488,6 +2934,8 @@ end
 
 -- Class NNXYBreeder
 NNXYBreeder = Class(NNBreeder)
+NNXYBreeder.mutations = shallowCopy(NNBreeder.mutations)
+ClassRegistry(NNXYBreeder)
 
 function xyMutation(param, genome)
 	if #genome.genes == 0 then
@@ -2537,6 +2985,76 @@ NNXYBreeder:addMutation("xy",
 ---========================================---
 
 ---========================================---
+--- CHROMOSOME
+---
+--- A group of genes, executor, and breeder
+--- A piece of an organism
+--- Includes getting the genome, executors
+--- and reproduction
+---========================================---
+
+-- Interface Chromosome
+Chromosome = Interface(nil,{
+	getGenes = abstractFunction, -- ()
+	getExecutor = abstractFunction, -- ()
+	getBreeder = abstractFunction, -- ()
+	setGenes = abstractFunction, -- ()
+	makePhenotype = abstractFunction, -- (genes)
+	makeMutationData = abstractFunction, -- (genes)
+	difference = abstractFunction, -- (genes1, genes2)
+})
+-- End Chromosome
+
+-- Abstract Class BasicChromosome
+BasicChromosome = Class(nil, {
+	defaultGenes = {},
+	defaultExecutor = {},
+	defaultBreeder = {}
+}):implements(Chromosome)
+
+function BasicChromosome:getDefaultGenes()
+	return self.defaultGenes
+end
+
+function BasicChromosome:getExecutor()
+	return self.defaultExecutor
+end
+
+function BasicChromosome:getBreeder()
+	return self.defaultBreeder
+end
+
+function BasicChromosome:makePhenotype(genes)
+	return nil
+end
+
+function BasicChromosome:makeMutationData(genes)
+	return nil
+end
+
+function BasicChromosome:difference(genes1, genes2)
+	return 0
+end
+-- End BasicChromosome
+
+-- Class ChomosomeFactory
+ChromosomeFactory = Class(nil)
+
+function ChromosomeFactory:makeChomosome(name, param)
+	local newChromosome = Class(BasicChromosome)
+	newChromosome.defaultGenes = param.genes
+	newChromosome.defaultExecutor = param.executor
+	newChromosome.defaultBreeder = param.breeder
+	ClassRegistry(newChromosome, name)
+	return newChromosome
+end
+-- End ChromosomeFactory
+
+---========================================---
+--- CHROMOSOME END
+---========================================---
+
+---========================================---
 --- ORGANISM
 ---
 --- Acts and breed
@@ -2548,182 +3066,170 @@ Organism = Interface(nil,{
 	name = "?",
 	birth = abstractFunction, -- ()
 	act = abstractFunction,	-- ()
-	breed = abstractFunction, -- (species)
 	die = abstractFunction, -- () for cleanup
+	breed = abstractFunction, -- (species)
 	difference = abstractFunction, -- for species
 })
 -- End Organism
 
--- Abstract Class BasicOrganism
-BasicOrganism = Class(nil, {
+-- Abstract Class GenomeOrganism
+GenomeOrganism = Class(nil, {
 	genome = {},
 	phenotype = {},
+	mutationData = {},
 	breeder = nil,
 	executor = nil,
-	fitness = 0,
-	savedKeys = {"genome", "fitness", "name"},
-	breederType = nil,
-	executorType = nil
+	fitness = nil,
+	savedKeys = {"genome", "fitness", "name"}
 }):implements(Organism, Persistent)
-ClassRegistry(BasicOrganism)
+ClassRegistry(GenomeOrganism)
 
-function BasicOrganism:init(genome)
+function GenomeOrganism:init(genome)
 	self.genome = genome
 	self.name = genome.name
-	self.fitness = 0
+	self.fitness = nil
 	self.globalRank = 0
 end
 
-function BasicOrganism:write(persistence)
+function GenomeOrganism:write(persistence)
 	-- Don't save the computed configuration
 	local savedVariables = {}
 	for _, key in ipairs(self.savedKeys) do
 		savedVariables[key] = self[key]
 	end
-	savedVariables.executorName = ClassRegistry:className(self.executorType)
-	savedVariables.breederName = ClassRegistry:className(self.breederType)
+	savedVariables.executor = self.executor
+	savedVariables.breeder = self.breeder
 	persistence:write(savedVariables)
 end
 
-function BasicOrganism:read(persistence)
+function GenomeOrganism:read(persistence)
 	local savedVariables = persistence:read(savedVariables)
 	local savedObject = self:new()
 	for _, key in ipairs(self.savedKeys) do
 		savedObject[key] = savedVariables[key]
 	end
-	savedObject.executorType = ClassRegistry:get(savedObject.executorName)
-	savedObject.breederType = ClassRegistry:get(savedObject.breederName)
+	savedObject.executor = savedVariables.executor
+	savedObject.breeder = savedVariables.executor
 	return savedObject
 end
 
-function BasicOrganism:setExecutor(executorType)
-	self.executorType = executorType
+function GenomeOrganism:setExecutor(executor)
+	self.executor = executor
 end
 
-function BasicOrganism:setBreeder(breederType)
-	self.breederType = breederType
+function GenomeOrganism:setBreeder(breeder)
+	self.breeder = breeder
 end
 
-function BasicOrganism:birth()	
+function GenomeOrganism:birth()
 	local source, sink = self:makeIO()
 	self.source, self.sink = source, sink
 	--self.phenotype = self.genome:getConfig(source, sink)
 	self.phenotype = self:makePhenotype(source, sink)
+	self.mutationData = self:makeMutationData(source, sink)
 	self.executor = self:makeExecutor(self.phenotype, source, sink)
 	self.executor:reset()
 end
 
-function BasicOrganism:makeIO()
+function GenomeOrganism:makeIO()
 	local inputSpec = self.genome:getInputSpec()
 	local outputSpec = self.genome:getOutputSpec()
 	return IORegistry:getInput(self.genome.inputSpec),
 		IORegistry:getOutput(self.genome.outputSpec)
 end
 
-function BasicOrganism:act()
+function GenomeOrganism:makePhenotype(source, sink)
+	return self.genome:getPhenotype(source, sink)
+end
+
+function GenomeOrganism:makeMutationData(source, sink)
+	return self.genome:getMutationData(source, sink)
+end
+
+function GenomeOrganism:makeExecutor(phenotype, source, sink)
+	self.executor:setPhenotype(phenotype)
+	self.executor:setSource(source)
+	self.executor:setSink(sink)
+	return self.executor
+end
+
+function GenomeOrganism:makeBreeder(mutationData)
+	self.breeder:setData(mutationData)
+	return self.breeder
+end
+
+function GenomeOrganism:act()
 	self.source:prepare()
 	self.sink:prepare()
 	self.executor:run()
 end
 
-function BasicOrganism:breed(species)
-	self.breeder = self:makeBreeder()
+function GenomeOrganism:breed(species)
+	self.breeder = self:makeBreeder(self.mutationData)
 	local childGenome = self.breeder:breed(self, species)
-	local child = self._class(childGenome)
-	child:setExecutor(self.executorType)
-	child:setBreeder(self.breederType)
+	return self:makeChildWithGenome(childGenome)
+end
+
+function GenomeOrganism:makeChildWithGenome(genome)
+	local child = self._class(genome)
+	child:setExecutor(self.executor)
+	child:setBreeder(self.breeder)
 	return child
 end
 
-function BasicOrganism:mutate()
+function GenomeOrganism:mutate()
 	self.breeder = self:makeBreeder()
 	self.breeder:mutate(self.genome)
 	return self.genome
 end
 
-function BasicOrganism:die()
-	self.executor = nil
+function GenomeOrganism:die()
 	self.phenotype = nil
 end
 
-function BasicOrganism:difference(organism2)
+function GenomeOrganism:difference(organism2)
 	return self.genome:difference(organism2.genome)
 end
 
-function BasicOrganism:getGenome()
+function GenomeOrganism:getGenome()
 	return self.genome
 end
--- End BasicOrganism
+-- End GenomeOrganism
 
 -- Class NNOrganism
-NNOrganism = Class(BasicOrganism, {
+NNOrganism = Class(GenomeOrganism, {
 	
 })
 ClassRegistry(NNOrganism)
 -- End NNOrganism
 
-function NNOrganism:makePhenotype(source, sink)
-	local network = NeuralNetwork()
-	
-	local id
-	local genome = self.genome
-	genome.geneNeuronMap = {}
-	local idMap = genome.geneNeuronMap
-	
-	local neuronCount = 1
-	for name, id, handle in genome.inputSpec:iterator(source) do
-		id = network:addNeuron(Neuron:makeInput(handle)).id
-		idMap[neuronCount] = id
-		neuronCount = neuronCount + 1
-	end
-
-	for name, id, handle in genome.outputSpec:iterator(sink) do
-		id = network:addNeuron(Neuron:makeOutput(handle)).id
-		idMap[neuronCount] = id
-		neuronCount = neuronCount + 1
-	end
-	
-	table.sort(genome.genes, function (a,b)
-			return (a.out < b.out)
-	end)
-	
-	for i=1,#genome.genes do
-		local gene = genome.genes[i]
-		
-		if gene.enabled then
-			local id = idMap[gene.out]
-			if id == nil then
-					id = network:addNeuron(Neuron:makeHidden()).id
-					idMap[gene.out] = id
-			end
-			
-			local neuron = network:find(id)
-
-			local id = idMap[gene.into]
-			if id == nil then
-				id = network:addNeuron(Neuron:makeHidden()).id
-				idMap[gene.into] = id
-			end
-			
-			neuron:addLinkInto(idMap[gene.into], gene.weight)
-			--table.insert(neuron.incoming, gene)
-		end
-	end
-	
-	self.network = network
-	return network
-end
-
-function NNOrganism:makeExecutor(phenotype, source, sink)
-	return self.executorType(phenotype, source, sink)
-end
-
-function NNOrganism:makeBreeder()
-	return self.breederType():addParam({crossoverChance = CrossoverChance})
+function NNOrganism:makeBreeder(mutationData)
+	self.breeder:setData(mutationData)
+	self.breeder:addParam({crossoverChance = CrossoverChance})
+	return self.breeder
 end
 
 ---========================================---
 --- ORGANISM END
+---========================================---
+
+---========================================---
+--- STANDARD CHROMOSOMES
+---
+--- Standard neural network chromosomes
+--- These will be commonly used
+---========================================---
+
+NNChromosome = Class(BasicChromosome, {
+	defaultGenes = {
+	
+	},
+	defaultExecutor = NNExecutor,
+	defaultBreeder = NNBreeder,
+})
+
+---========================================---
+--- STANDARD CHROMOSOMES END
 ---========================================---
 
 ---========================================---
@@ -2826,9 +3332,9 @@ function BasicMother:makeOriginal()
 		inputSpec = self.inputSpec,
 		outputSpec = self.outputSpec,
 		genes = self.genes,
-		fitness = 0,
+		--fitness = 0,
 		adjustedFitness = 0,
-		network = {},
+		--network = {},
 		globalRank = 0,
 		mutationRates = {
 			connections = MutateConnectionsChance,
@@ -2846,8 +3352,8 @@ function BasicMother:makeOriginal()
 	})
 	genome.maxneuron = genome.inputSpec:getSize() + genome.outputSpec:getSize()
 	local originalOrganism = self.organismType(genome)
-	originalOrganism:setExecutor(self.executorType)
-	originalOrganism:setBreeder(self.breederType)
+	originalOrganism:setExecutor(self.executorType())
+	originalOrganism:setBreeder(self.breederType())
 	originalOrganism:mutate()
 	return originalOrganism
 end
@@ -2864,6 +3370,182 @@ NNMother = Class(BasicMother, {
 
 ---========================================---
 --- MOTHER END
+---========================================---
+
+---========================================---
+--- GENERATION
+---
+--- Create the next generation after the
+--- each organism has been simulated
+---========================================---
+
+-- Interface Generation
+Generation = Interface(nil, {
+	generate = abstractFunction, -- (population)
+})
+-- End Generation
+
+-- Abstract Class AbstractGeneration
+AbstractGeneration = Class(nil, {
+	population = nil
+}):implements(Generation)
+
+function AbstractGeneration.zeroIfNil(value)
+	return value or 0
+end
+
+function AbstractGeneration:orderByFitness(organisms)
+	local zeroIfNil = AbstractGeneration.zeroIfNil
+	
+	table.sort(organisms, function (a,b)
+		return zeroIfNil(a.fitness) < zeroIfNil(b.fitness)
+	end)
+	
+	return organisms
+end
+
+function AbstractGeneration:rankGlobally(organisms)
+	local globalRanking = {}
+	local sortedOrganisms = self:orderByFitness(organisms)
+	
+	local zeroIfNil = AbstractGeneration.zeroIfNil
+	
+	for rank, organism in ipairs(sortedOrganisms) do
+		globalRanking[organism] = rank
+	end
+	
+	return globalRanking
+end
+
+function AbstractGeneration:getTotalAverageScore(scores)
+	local population = self.population
+	local total = 0
+	for _, species in ipairs(population.species) do
+		total = total + species:getAverageScore(scores)
+	end
+
+	return total
+end
+-- End AbstractGeneration
+
+-- Class NNGeneration
+NNGeneration = Class(AbstractGeneration,{
+	crossoverProbability = 0.25,
+	maxStaleness = 10,
+})
+ClassRegistry(NNGeneration)
+
+function NNGeneration:randomOrganism(organisms)
+	return organisms[math.random(1, #organisms)]
+end
+
+function NNGeneration:breedChild(organism, species)
+--[[
+	if (math.random < self.crossoverProbability) then
+		return organism:breed(self:randomOrganism(species.organisms))
+	else
+		return organism:breed()
+	end]]
+	return organism:breed(species.organisms)
+end
+
+function NNGeneration:breedFromSpecies(species)
+	local organism = self:randomOrganism(species.organisms)
+	return self:breedChild(organism, species)
+end
+
+function NNGeneration:cullSpecies(numLeft)
+	local population = self.population
+	numLeft = numLeft or 1
+	for _, species in ipairs(population.species) do
+		self:orderByFitness(species.organisms)
+		
+		local organismsLeft = numLeft or 1
+		if type(organismsLeft) == "function" then
+			organismsLeft = organismsLeft(species)
+		end
+		while #species.organisms > organismsLeft do
+			table.remove(species.organisms)
+		end
+	end
+end
+
+function NNGeneration:removeStaleSpecies()
+	local population = self.population
+	local survivingSpecies = {}
+
+	for _, species in ipairs(population.species) do
+		self:orderByFitness(species.organisms)
+		
+		if species.organisms[1].fitness > species.topFitness then
+			species.topFitness = species.organisms[1].fitness
+			species.staleness = 0
+		else
+			species.staleness = species.staleness + 1
+		end
+		if species.staleness < self.maxStaleness or species.topFitness >= population.maxFitness then
+			table.insert(survivingSpecies, species)
+		end
+	end
+
+	population.species = survivingSpecies
+end
+
+function NNGeneration:removeWeakSpecies(scores)
+	local population = self.population
+	local survivingSpecies = {}
+
+	local sum = self:getTotalAverageScore(scores)
+	for _, species in ipairs(population.species) do
+		local strength = math.floor(species:getAverageScore(scores) / sum * population.maxSize)
+		if strength >= 1 then
+			table.insert(survivingSpecies, species)
+		end
+	end
+
+	population.species = survivingSpecies
+end
+
+function NNGeneration:generate(population)
+	self.population = population
+	
+	-- Cull the bottom half of each species
+	self:cullSpecies(function(species)
+		return math.ceil(#species.organisms/2)
+	end)
+	
+	self:removeStaleSpecies()
+	
+	local scores = self:rankGlobally(population:getOrganisms())
+	self:removeWeakSpecies(scores)
+	
+	local sum = self:getTotalAverageScore(scores)
+	local children = {}
+	for _, species in ipairs(population.species) do
+		numToBreed = math.floor(species.averageScore / sum * population.maxSize) - 1
+		for i=1,numToBreed do
+			table.insert(children, self:breedFromSpecies(species))
+		end
+	end
+	-- Cull all but the top member of each species
+	self:cullSpecies(1)
+	while #children + #population.species < population.maxSize do
+		local species = population.species[math.random(1, #population.species)]
+		table.insert(children, self:breedFromSpecies(species))
+	end
+	for i=1,#children do
+		local child = children[i]
+		population:addOrganism(child)
+	end
+	
+	population.generationNumber = population.generationNumber + 1
+	local filename = ConfigUI:getSaveLoadFile()
+	population:writeFile("backup." .. population.generationNumber .. "." .. filename)
+end
+-- End NNGeneration
+
+---========================================---
+--- GENERATION END
 ---========================================---
 
 ---========================================---
@@ -2884,17 +3566,17 @@ function Species:init(name)
 	self.topFitness = 0
 	self.staleness = 0
 	self.organisms = {}
-	self.averageFitness = 0
+	self.averageScore = 0
 end
 
-function Species:calculateAverageFitness()
+function Species:getAverageScore(scores)
 	local total = 0
-
 	for _, organism in ipairs(self.organisms) do
-		total = total + organism.globalRank
+		total = total + scores[organism]
 	end
 
-	self.averageFitness = total / #self.organisms
+	self.averageScore = total / #self.organisms
+	return self.averageScore
 end
 
 function Species:addOrganism(organism)
@@ -2933,6 +3615,7 @@ ClassRegistry(Population)
 function Population:init(maxSize)	
 	self.species = {}
 	self.generation = 0
+	self.generationNumber = 0
 	self.maxFitness = 0
 	
 	self.maxSize = maxSize
@@ -2960,6 +3643,17 @@ function Population:addOrganism(organism)
 	table.insert(self.organisms, organism)
 end
 
+function Population:getOrganisms()
+	local allOrganisms = {}
+	for i = 1, #self.species do
+		local species = self.species[i]
+		for j = 1, #species.organisms do
+			table.insert(allOrganisms, species.organisms[j])
+		end
+	end
+	return allOrganisms
+end
+
 function Population:speciesIter()
 	local i = 0
 	return function()
@@ -2971,135 +3665,6 @@ end
 function Population:isInSameSpecies(organism1, organism2)
 		local diff = organism1:difference(organism2)
         return diff < DeltaThreshold
-end
-
-function Population:rankGlobally()
-        local global = {}
-        for s = 1,#self.species do
-                local species = self.species[s]
-                for g = 1,#species.organisms do
-                        table.insert(global, species.organisms[g])
-                end
-        end
-        table.sort(global, function (a,b)
-                return (a.fitness < b.fitness)
-        end)
-       
-        for g=1,#global do
-                global[g].globalRank = g
-        end
-end
-
-function Population:calculateAverageFitness(species)
-		species:calculateAverageFitness()
-end
- 
-function Population:totalAverageFitness()
-        local total = 0
-        for s = 1,#self.species do
-                local species = self.species[s]
-                total = total + species.averageFitness
-        end
- 
-        return total
-end
- 
-function Population:cullSpecies(cutToOne)
-        for s = 1,#self.species do
-                local species = self.species[s]
-              
-                table.sort(species.organisms, function (a,b)
-                        return (a.fitness > b.fitness)
-                end)
-               
-                local remaining = math.ceil(#species.organisms/2)
-                if cutToOne then
-                        remaining = 1
-                end
-                while #species.organisms > remaining do
-                        table.remove(species.organisms)
-                end
-        end
-end
-
-function Population:breedChild(species)
-	local child = {}
-	local organism = species.organisms[math.random(1, #species.organisms)]
-	
-	return organism:breed(species.organisms)
-end
-
-function Population:removeStaleSpecies()
-        local survived = {}
- 
-        for s = 1,#self.species do
-                local species = self.species[s]
-               
-                table.sort(species.organisms, function (a,b)
-                        return (a.fitness > b.fitness)
-                end)
-                if species.organisms[1].fitness > species.topFitness then
-                        species.topFitness = species.organisms[1].fitness
-                        species.staleness = 0
-                else
-                        species.staleness = species.staleness + 1
-                end
-                if species.staleness < StaleSpecies or species.topFitness >= self.maxFitness then
-                        table.insert(survived, species)
-                end
-        end
- 
-        self.species = survived
-end
- 
-function Population:removeWeakSpecies()
-        local survived = {}
- 
-        local sum = self:totalAverageFitness()
-        for s = 1,#self.species do
-                local species = self.species[s]
-                breed = math.floor(species.averageFitness / sum * self.maxSize)
-                if breed >= 1 then
-                        table.insert(survived, species)
-                end
-        end
- 
-        self.species = survived
-end
- 
-function Population:newGeneration()
-        self:cullSpecies(false) -- Cull the bottom half of each species
-        self:rankGlobally()
-        self:removeStaleSpecies()
-        self:rankGlobally()
-        for s = 1,#self.species do
-                local species = self.species[s]
-                self:calculateAverageFitness(species)
-        end
-        self:removeWeakSpecies()
-        local sum = self:totalAverageFitness()
-        local children = {}
-        for s = 1,#self.species do
-                local species = self.species[s]
-                breed = math.floor(species.averageFitness / sum * self.maxSize) - 1
-                for i=1,breed do
-                        table.insert(children, self:breedChild(species))
-                end
-        end
-        self:cullSpecies(true) -- Cull all but the top member of each species
-        while #children + #self.species < self.maxSize do
-                local species = self.species[math.random(1, #self.species)]
-                table.insert(children, self:breedChild(species))
-        end
-        for c=1,#children do
-                local child = children[c]
-                self:addOrganism(child)
-        end
-       
-        self.generation = self.generation + 1
-       
-		local filename = ConfigUI:getSaveLoadFile()
-        self:writeFile("backup." .. self.generation .. "." .. filename)
 end
 
 function Population:writeFile(filename)
@@ -3143,7 +3708,7 @@ function Population:countMeasured()
 	for _,species in pairs(self.species) do
 		for _,organism in pairs(species.organisms) do
 			total = total + 1
-			if organism.fitness ~= 0 then
+			if organism.fitness ~= nil then
 				measured = measured + 1
 			end
 		end
@@ -3151,6 +3716,13 @@ function Population:countMeasured()
 	return measured, total
 end
 
+function Population:clearFitness()
+	for _,species in pairs(self.species) do
+		for _,organism in pairs(species.organisms) do
+			organism.fitness = nil
+		end
+	end
+end
 ---========================================---
 --- POPULATION END
 ---========================================---
@@ -3246,6 +3818,159 @@ function RightmostJudge:shouldEnd()
 	local fitness = self:measure()
 	return self.timeout <= 0 or fitness < -100
 end
+-- End RightmostJudge
+
+local recordSuccess = function(winCount, totalTime)
+	if winCount > BestWins or (winCount == BestWins and totalTime > BestTime) then
+		BestWins = winCount
+		BestTime = totalTime
+	end
+end
+
+-- SFOffenseJudge
+SFOffenseJudge = Class(BasicJudge)
+ClassRegistry(SFOffenseJudge)
+
+SFTimeOut = 120
+
+function SFOffenseJudge:setup()
+	BasicJudge.setup(self)
+	self.rightmost = 0
+	self.timeout = SFTimeOut
+	self.actionCount = 0
+	self.lastActionTime = 0
+	self.result = nil
+	self.fitnessSoFar = 0
+	self.waitingForNextMatch = false
+	self.deathTimer = nil
+	self.numberWins = 0
+	self.totalTime = 0
+end
+
+function SFOffenseJudge:step()
+	BasicJudge.step(self)
+	
+	currentGame:readValues()
+	if not JoypadUtil:didInputChange() then
+		self.timeout = self.timeout - 1
+	else
+		if currentGame.timer ~= self.lastActionTime then
+			self.actionCount = self.actionCount + 1
+			self.lastActionTime = currentGame.timer
+		end
+		self.timeout = SFTimeOut
+	end
+	if self:getHealth(2) <= 0 then
+		if not self.waitingForNextMatch and self.deathTimer == nil then
+			self.fitnessSoFar = self.fitnessSoFar + self:calcResult()
+			self.numberWins = self.numberWins + 1
+			self.totalTime = self.totalTime + currentGame.timer
+			recordSuccess(self.numberWins, self.totalTime)
+			self.waitingForNextMatch = true
+		end
+	end
+	if self.waitingForNextMatch then
+		if currentGame.timer == 98 then
+			self.waitingForNextMatch = false
+		end
+	end
+end
+
+function SFOffenseJudge:getHealth(playerNum)
+	local hp = currentGame.players[playerNum].health
+	if hp == 255 then hp = -50 end -- Bonus included
+	return hp
+end
+
+function SFOffenseJudge:measure()
+	local myHp = self:getHealth(1)
+	local enemyHp = self:getHealth(2)
+	local damageDealt = 176 - enemyHp
+	local fitness = damageDealt*100 + myHp*10 + self.actionCount
+	return fitness
+end
+
+function SFOffenseJudge:calcResult()
+	local myHp = self:getHealth(1)
+	if self.timeout <= 0 then
+		myHp = -100
+	end
+	local enemyHp = self:getHealth(2)
+	local damageDealt = 176 - enemyHp
+	local fitness = damageDealt*100 + myHp*10 + self.actionCount
+	if enemyHp <= 0 then
+		local timer = currentGame.timer
+		fitness = fitness + 5000*timer
+	end
+	fitness = fitness + 100 * 10
+	return fitness
+end
+
+function SFOffenseJudge:finalMeasurement()
+	if self.result then
+		return self.result
+	end
+	return self:calcResult()
+end
+
+function SFOffenseJudge:shouldEnd()
+	currentGame:readValues()
+	local shouldEnd = (not self.waitingForNextMatch and
+		( self:getHealth(1) <= 0
+		  or (self.actionCount <= 1 and self.timeout <= 0)
+		  or (currentGame.timer == 0 and self:getHealth(2) > 0) ) )
+		or currentGame.players[1].victories == 2
+	
+	if shouldEnd and self.deathTimer == nil then
+		local remainingFitness = 0
+		if not self.waitingForNextMatch then
+			remainingFitness = self:calcResult()
+		end
+		self.result = self.fitnessSoFar + remainingFitness
+		self.deathTimer = 60
+	end
+	
+	if self.deathTimer ~= nil and self.deathTimer > 0 then
+		self.deathTimer = self.deathTimer - 1
+		if self.deathTimer == 0 then
+			return true
+		end
+	end
+	return false
+end
+-- End SFOffenseJudge
+
+-- SFDefenseJudge
+SFDefenseJudge = Class(SFOffenseJudge)
+ClassRegistry(SFDefenseJudge)
+
+SFTimeOut = 120
+
+function SFDefenseJudge:measure()
+	local myHp = self:getHealth(1)
+	local enemyHp = self:getHealth(2)
+	local damageDealt = 176 - enemyHp
+	local fitness = damageDealt*10 + myHp*100 + self.actionCount
+	return fitness
+end
+
+function SFDefenseJudge:calcResult()
+	local myHp = self:getHealth(1)
+	if self.timeout <= 0 then
+		myHp = -100
+	end
+	local enemyHp = self:getHealth(2)
+	local damageDealt = 176 - enemyHp
+	local timer = currentGame.timer
+	local fitness = damageDealt*10 + myHp*100 + self.actionCount
+	if enemyHp <= 0 then
+		fitness = fitness + 5000*timer
+	end
+	fitness = fitness + 20 * (100 - currentGame.timer)
+	fitness = fitness + 100 * 100
+	return fitness
+end
+-- End SFDefenseJudge
 
 ---========================================---
 --- JUDGE END
@@ -3310,27 +4035,20 @@ function GenomeSimulation:init(organism, evaluator)
 	self.organism = organism
 
 	--self.organism = NNOrganism(genome)
-	self.evaluator = evalutor
+	self.evaluator = evaluator
 	self.fitness = 0
 	self.maxFitness = 0
-	
-	self.evaluator = RightmostJudge
 end
 
 function GenomeSimulation:setup(param)
-	savestate.load(Filename);
-	
 	self.rightmost = 0
 	self.timeout = TimeoutConstant
 	JoypadUtil:clear()
 	
-	--local organism = genome:makeOrganism(IORegistry)
-	--organism:reset()
 	self.organism:birth()
 	
 	self.evaluator:setOrganism(self.organism)
 	self.evaluator:setup()
-	
 	self:runEvaluation()
 end
 
@@ -3355,21 +4073,18 @@ function GenomeSimulation:finish()
 	self.organism.fitness = fitness
 	self.fitness = fitness
 	
-	-- TODO: Don't reference popSim
-	local pop = popSim.population
-	if fitness > pop.maxFitness then
-			pop.maxFitness = fitness
-			ConfigUI:setMaxFitness(pop.maxFitness)
-			
-			local filename = ConfigUI:getSaveLoadFile()
-			pop:writeFile("backup." .. pop.generation .. "." .. filename)
-	end
-	
 	self.organism:die()
 end
 
 function GenomeSimulation:getCurrentFitness()
 	return self.evaluator:measure()
+end
+
+function GenomeSimulation:getFactory(judge)
+	return function(organism)
+		local genomeSim = self(organism, judge)
+		return genomeSim
+	end
 end
 -- End GenomeSimulation
 
@@ -3377,21 +4092,29 @@ end
 PopulationSimulation = Class(BasicSimulation)
 ClassRegistry(PopulationSimulation)
 
-function PopulationSimulation:init(population, genomeSimFactory)
+function PopulationSimulation:init(population, generation, genomeSimFactory)
 	self:_baseInit()
 
 	self.population = population
+	self.generation = generation
 	self.genomeSimFactory = genomeSimFactory
 	self.genomeSimulation = nil
 	self.genomeSimDone = false
+	self.needGenomeSim = true
+	
+	self.savestate = "DP1.state"
 	
 	self.speciesIter = nil
 	self.organismIter = nil
 	self.activeSpecies = nil
 	self.activeOrganism = nil
-	self:reset()
+	--self:reset()
 	
 	return self
+end
+
+function PopulationSimulation:setup()
+	self:reset()
 end
 
 function PopulationSimulation:isDone()
@@ -3401,27 +4124,30 @@ end
 function PopulationSimulation:genomeSimDoneHandler(sim)
 	self.genomeSimDone = true
 	
-	console.writeline("Gen " .. self.population.generation .. " species " .. self.activeSpecies.name .. " genome " .. self.activeOrganism.name .. " fitness: " .. sim.fitness)
+	local pop = self.population
+	if sim.fitness > pop.maxFitness then
+			pop.maxFitness = sim.fitness
+			ConfigUI:setMaxFitness(pop.maxFitness)
+			
+			-- TODO: Pull this out
+			local filename = ConfigUI:getSaveLoadFile()
+			pop:writeFile("backup." .. pop.generationNumber .. "." .. filename)
+	end
 	
+	-- TODO: Pull this out
+	console.writeline("Gen " .. self.population.generationNumber .. " species " .. self.activeSpecies.name .. " genome " .. self.activeOrganism.name .. " fitness: " .. sim.fitness)
+	
+	-- Go to next organism
 	self:reset()
 end
 
 function PopulationSimulation:evaluate()
-	if self.genomeSimulation == nil then
+	if self.needGenomeSim then
 		self:initializeGenomeSim()
 	end
 	
 	if self.genomeSimulation then
 		self.genomeSimulation:step()
-	end
-	
-	if self.genomeSimDone then
-		self.genomeSimulation = nil
-		
-		while self:fitnessAlreadyMeasured() do
-			self:nextGenome()
-		end
-		--initializeRun()
 	end
 end
 
@@ -3430,28 +4156,22 @@ function PopulationSimulation:reset()
 	self.activeSpecies = self.speciesIter()
 	self.organismIter = self.activeSpecies:organismIter()
 	self.activeOrganism = self.organismIter()
-
-	--self.currentSpecies = 1
-	--self.currentGenome = 1
+	
+	while self:fitnessAlreadyMeasured() do
+		self:nextGenome()
+	end
+	
+	self:initializeGenomeSim()
 end
 
 function PopulationSimulation:finish()
-	self.population:newGeneration()
-	
+	--self.population:newGeneration()
+	self.generation:generate(self.population)
 	self:reset()
 end
 
 function PopulationSimulation:nextGenome()
-	local population = self.population
-	--[[
-	self.currentGenome = self.currentGenome + 1
-	if self.currentGenome > #population.species[self.currentSpecies].genomes then
-		self.currentGenome = 1
-		self.currentSpecies = self.currentSpecies+1
-	end]]--
-	
 	self.activeOrganism = self.organismIter()
-	
 	if self.activeOrganism == nil then
 		self.activeSpecies = self.speciesIter()
 		if self.activeSpecies ~= nil then
@@ -3467,45 +4187,35 @@ function PopulationSimulation:fitnessAlreadyMeasured()
 	if species == nil then return false end
 	
 	local organism = self.activeOrganism
-	return organism.fitness ~= 0
+	return organism.fitness ~= nil
 end
 
 function PopulationSimulation:initializeGenomeSim()
-	savestate.load("DP1.state"); -- TODO remove hardcoded
-	--savestate.load(Filename);
-	--rightmost = 0
-	--timeout = TimeoutConstant
-	JoypadUtil:clear()
-	
 	local organism = self.activeOrganism
-
-	local genomeSimulation = GenomeSimulation(organism, RightmostJudge)
-	genomeSimulation:setup()
-	genomeSimulation:step()
-	self.genomeSimulation = genomeSimulation
-	--self.genomeSimulation = genomeSimFactory(genome)
 	
-	self.genomeSimDone = false
-	self.genomeSimulation.onComplete:add(function (sim)
-		self:genomeSimDoneHandler(sim)
-	end)
+	if organism then
+		savestate.load(self.savestate);
+		JoypadUtil:clear()
+		
+		self.genomeSimulation = self.genomeSimFactory(organism)
+		
+		self.genomeSimulation:setup()
+		self.needGenomeSim = false
+		
+		self.genomeSimDone = false
+		self.genomeSimulation.onComplete:add(function (sim)
+			self:genomeSimDoneHandler(sim)
+		end)
+	end
 end
---[[
-function PopulationSimulation:activeGenome()
-	--local species = self.population.species[self.currentSpecies]
-	--local genome = species.genomes[self.currentGenome]
-	
-	return self.activeGenome
-end]]--
 
 function PopulationSimulation:getCurrentSpecies()
-	--return self.currentSpecies
-	return self.activeSpecies.name
+	local species = self.activeSpecies
+	return species.name
 end
 
 function PopulationSimulation:getCurrentGenome()
 	return self.activeOrganism.name
-	--return self.currentGenome
 end
 
 -- TODO: remove/fix
@@ -3514,12 +4224,12 @@ function PopulationSimulation:getFrame()
 	if self.genomeSimulation then
 		frame = self.genomeSimulation.frame
 	end
-	return frame-2
+	return frame-1
 end
 
 function PopulationSimulation:getCurrentFitness()
 	local genomeSim = self.genomeSimulation
-	if genomeSim == nil then
+	if genomeSim == nil or self.needGenomeSim then
 		return 0
 	end
 	
@@ -3527,75 +4237,34 @@ function PopulationSimulation:getCurrentFitness()
 end
 
 function PopulationSimulation:playTop()
-	local maxfitness = 0
+	local maxFitness = 0
 	
 	for species,s in self.population:speciesIter() do
 		for organism,g in species:organismIter() do
-			if organism.fitness > maxfitness then
-				maxfitness = organism.fitness
+			if organism.fitness and organism.fitness > maxFitness then
+				maxFitness = organism.fitness
 				self.activeSpecies = species
 				self.activeOrganism = organism
 			end
 		end
 	end
 	
-	self.maxFitness = maxfitness
-	self.genomeSimulation = nil
+	self.maxFitness = maxFitness
+	self.needGenomeSim = true
 	
 	ConfigUI:setMaxFitness(self.maxFitness)
 	return
 end
+
+function PopulationSimulation:clearFitness()
+	self.population:clearFitness()
+	
+	self.maxFitness = 0
+	self:reset()
+	
+	ConfigUI:setMaxFitness(self.maxFitness)
+end
 -- End PopulationSimulation
-
--- Final Class SimulationManager
-SimulationManager = Class(nil, {
-	simulationsInProgress = {},
-	
-})
-
-SimulationManager.completionHandler = function(simulation)
-	SimulationManager:RemoveSimulation(simulation)
-end
-
-function SimulationManager:AddSimulation(simulation, parameters, persist)
-	if persist == nil then persist = false end
-	
-	table.insert(self.simulationsInProgress, {
-		simulation = simulation,
-		param = parameters,
-		running = false,
-		persist = persist
-	})
-	simulation.onComplete:add(self.completionHandler)
-end
-
-function SimulationManager:EndSimulation(simulation)
-	local index = tableISearch(self.simulationsInProgress, function (v)
-		if v.simulation == simulation then
-			return true
-		end
-	end)
-	if index ~= nil then
-		local data = self.simulationsInProgress[index]
-		if not data.persist then
-			table.remove(self.simulationsInProgress, index)
-		else
-			data.running = false -- Forcing re-initialization
-		end
-	end
-end
-
-function SimulationManager:step()
-	for _, simData in ipairs(self.simulationsInProgress) do
-		local sim = simData.simulation
-		if not simData.running then
-			sim:setup(simData.parameters)
-			simData.running = true
-		end
-		sim:step()
-	end
-end
--- End SimulationManager
 
 ---========================================---
 --- SIMULATION END
@@ -3635,28 +4304,7 @@ end
 -- End BasicUI
 
 -- Class NNUI
-NNUI = Class(BasicUI, {
---[[
-	inputTiles = { x = 50, y = 70, xgap = 5, ygap = 5,
-		colorBorder = 0xFF000000, colorBackground = 0x80808080},
-	biasCell = { x = 80, y = 110 },
-	outputs = { x = 220, y = 30, ygap = 8 },
-	outputNames = { x = 223, y = 24, ygap = 8,
-		colorOn = 0xFF0000FF, colorOff = 0xFF000000,
-		fontSize = 9},
-	hidden = { x = 140, y = 140 },
-	neuron = { opacity = 0xFF000000, opacityInactive = 0x50000000, radius = 2 },
-	links = { opacity = 0xA0000000, opacityInactive = 0x20000000,
-		colorFunc = function(weight)
-			local brightness = 0x80-math.floor(math.abs(sigmoid(weight))*0x80)
-			if weight > 0 then
-				return 0x8000 + 0x10000*brightness
-			else
-				return 0x800000 + 0x100*brightness
-			end
-		end },
-	box = { colorBorder = 0x00000000, colorBackground = 0x80FF0000 }]]--
-})
+NNUI = Class(BasicUI)
 
 function NNUI:init(...)
 	self._baseInit(...)
@@ -3796,11 +4444,50 @@ function NNUI:drawXYInput(x, y, offset)
 	return x, y + 5+2*BoxRadius*5+5
 end
 
+function NNUI:drawHitboxInput(x, y, offset)
+	local i = offset
+	local network = self.network
+	local points = self.data.param
+	
+	local backgroundColor = 0x40808080
+	gui.drawBox(x - 2, y, x+5*10, y+5*7 + 2, 0xFF000000, backgroundColor)
+	
+	local labels = {"A", "X", "Y", "a", "y!"}
+	for value_index = 1, 5 do
+		gui.drawText(x+value_index*10-10, y, labels[value_index], 0xFF0000FF, 8)
+	end
+	
+	if self.needCellGeneration then
+		for value_index = 1,5 do
+			for freq_index = 1,4 do
+			
+				local px = value_index*10-10
+				local py = freq_index*7-7
+				cell = {
+					x = x +3 + px,
+					y = y +3 + 8+ py,
+					neuron = network.inputNeurons[i],
+					value = network.inputNeurons[i].value,
+					--requireInput = true,
+					hideBorder = false,
+					fixed = true
+				}
+				table.insert(self.inputCells, cell)
+				table.insert(self.cells, cell)
+				i = i + 1
+			end
+		end
+	end
+	return x, y + 5 * 7 + 8
+end
+
 NNUI.inputDrawers = {
 	TiledInput = "drawTiledInput",
 	BiasInput = "drawBias",
 	VelocityInput = "drawVelocity",
-	XYInput = "drawXYInput"
+	SpriteInput = "drawTiledInput",
+	XYInput = "drawXYInput",
+	HitboxInput = "drawHitboxInput"
 }
 
 function NNUI:drawInput(x, y)
@@ -3905,14 +4592,6 @@ function NNUI:organizeNetwork(count, boundary)
 				if c1.x >= c2.x then
 					c1.x = c1.x - 40
 				end
-				--[[
-				if c1.x < 90 then
-					c1.x = 90
-				end
-			   
-				if c1.x > 220 then
-					c1.x = 220
-				end--]]
 				c1.y = 0.75*c1.y + 0.25*c2.y
 				
 				self.applyBoundary(c1, boundary)
@@ -3923,13 +4602,6 @@ function NNUI:organizeNetwork(count, boundary)
 				if c1.x >= c2.x then
 					c2.x = c2.x + 40
 				end
-				--[[
-				if c2.x < 90 then
-					c2.x = 90
-				end
-				if c2.x > 220 then
-					c2.x = 220
-				end]]
 				c2.y = 0.25*c1.y + 0.75*c2.y
 				
 				self.applyBoundary(c2, boundary)
@@ -3996,7 +4668,7 @@ function NNUI:draw()
 	local organism = popSim.activeOrganism
 	--if genome.organism == nil then return end
 	
-	local network = organism.network
+	local network = organism.genome.network
 	
 	if network == nil then return end
 	
@@ -4023,11 +4695,11 @@ MutationRatesUI = Class(BasicUI)
 
 function MutationRatesUI:draw()
 	-- TODO fix encapsulation break
-	local genome = popSim.activeOrganism:getGenome()
+	local mutationValues = popSim.activeOrganism:getChromosome("mutationRates")
 	local pos = 100
 	local color = 0xFF000000
 	color = 0xFFFFFFFF
-	for mutation,rate in pairs(genome.mutationRates) do
+	for mutation,rate in pairs(mutationValues) do
 		gui.drawText(100, pos, mutation .. ": " .. rate, color, 10)
 		pos = pos + 8
 	end
@@ -4049,7 +4721,7 @@ function BannerUI:draw()
 	local genome = popSim:getCurrentGenome()
 	local frame = popSim:getFrame()
 	
-	gui.drawText(0, 0, "Gen " .. pop.generation .. " species " .. species .. " genome " .. genome .. " (" .. math.floor(measured/total*100) .. "%)", 0xFF000000, 11)
+	gui.drawText(0, 0, "Gen " .. pop.generationNumber .. " species " .. species .. " genome " .. genome .. " (" .. math.floor(measured/total*100) .. "%)", 0xFF000000, 11)
 	gui.drawText(0, 12, "Fitness: " .. popSim:getCurrentFitness(), 0xFF000000, 11)
 	gui.drawText(100, 12, "Max Fitness: " .. math.floor(pop.maxFitness), 0xFF000000, 11)
 end
@@ -4070,7 +4742,9 @@ function ConfigUI:show()
 	self.showNetworkCheck = forms.checkbox(form, "Show Map", 5, 30)
 	self.showMutationRatesCheck = forms.checkbox(form, "Show M-Rates", 5, 52)
 	self.restartButton = forms.button(form, "Restart", function()
-			popSim = PopulationSimulation(Population:makeStarter(mother), nil)
+			popSim = PopulationSimulation(Population:makeStarter(mother), GenomeSimulation:getFactory(TheJudge))
+			popSim.savestate = TheSavestate
+			popSim:setup()
 		end, 5, 77)
 		
 	self.saveButton = forms.button(form, "Save", function()
@@ -4126,11 +4800,23 @@ function ConfigUI:setMaxFitness(fitness)
 end
 -- End ConfigUI
 
+-- Class BestUI
+BestUI = Class(BestUI)
+
+function BestUI:draw()
+	local backgroundColor = 0xD0FFFFFF
+	gui.drawBox(0, 200, 115, 200+14, backgroundColor, backgroundColor)
+	
+	gui.drawText(0, 200, "Best Time " .. BestTime
+		.. " (" .. BestWins .. ")", 0xFF000000, 11)
+end
+-- End BestUI
+
 ---========================================---
 --- UI END
 ---========================================---
 
-PopulationMax = 200
+PopulationMax = 100
 DeltaDisjoint = 2.0
 DeltaWeights = 0.4
 DeltaThreshold = 1.0
@@ -4149,29 +4835,48 @@ DisableMutationChance = 0.4
 EnableMutationChance = 0.2
  
 TimeoutConstant = 20
- 
-MaxNodes = 1000000
 
 XYMutationChance = 0.75
 XYDistance = 8
 
-newInnovation = makeUniqueIdGenerator()
+TheJudge = SFDefenseJudge
+TheSavestate = "SF_Ryu_ChunLi.State"
 
+BestTime = -1
+BestWins = 0
+
+newInnovation = makeUniqueIdGenerator()
+--[[
 mother = NNMother()
 		:setInput({
 			{name = "TiledInput", range = 169},
 			{name = "VelocityInput", range = 2},
 			{name = "BiasInput", range = 1}
-		})
-		:setOutput({ {name = "ButtonOutput", range = 8} })
+			})
+		:setOutput({ {name = "ButtonOutput", range = 8} })]]
+		
+--[[
+mother = NNMother()
+		:setInput({
+			{name = "SpriteInput", range = 169},
+			{name = "BiasInput", range = 1}
+			})
+		:setOutput({ {name = "ButtonOutput", range = 8} })]]
 
+mother = NNMother()
+		:setInput({
+			{name = "HitboxInput", range = 4*5},
+			{name = "BiasInput", range = 1}
+			})
+		:setOutput({ {name = "ReflectButtonOutput", range = 10} })
+		
+--[[
 local fullParam = {}
 for i = -6, 6 do
 	for j = -6, 6 do
 		table.insert(fullParam, {i*16, j*16})
 	end
 end
-
 motherXY = NNMother()
 		:setInput({
 			{name = "XYInput", param = fullParam},
@@ -4181,9 +4886,15 @@ motherXY = NNMother()
 		:setOutput({ {name = "ButtonOutput", range = 8} })
 		:setBreeder(NNXYBreeder)
 
-mother = motherXY
+mother = motherXY]]
+
+
 popSim = nil
-popSim = PopulationSimulation(Population:makeStarter(mother), nil)
+popSim = PopulationSimulation(Population:makeStarter(mother),
+	NNGeneration(),
+	GenomeSimulation:getFactory(TheJudge))
+popSim.savestate = TheSavestate
+popSim:setup()
 
 -- Show Form
 ConfigUI:show()
@@ -4191,6 +4902,22 @@ ConfigUI:show()
 event.onexit(function ()
 	ConfigUI:dispose()
 end)
+
+function drawHitbox(box)
+	local screen_x = currentGame.screen_left
+	local x = box.left - screen_x
+	local x2 = box.right - screen_x
+	local y = box.top
+	local y2 = box.bottom
+	local color = 0x10FFFFFF
+	
+	if box.type == "attack" then
+		color = 0x80FF0000
+	elseif box.type == "push" then
+		color = 0x2000FF00
+	end
+	gui.drawBox(x,y,x2,y2,0xFF000000,color)
+end
 
 while true do
 	if ConfigUI:showNetwork() then
@@ -4206,6 +4933,15 @@ while true do
 	if not ConfigUI:hideBanner()then
 		BannerUI:draw()
 	end
-
+	
+	BestUI:draw()
+	--[[
+	currentGame:readValues()
+	for _, box in ipairs(currentGame.players[1]) do
+		drawHitbox(box)
+	end
+	for _, box in ipairs(currentGame.players[2]) do
+		drawHitbox(box)
+	end]]
 	emu.frameadvance();
 end
